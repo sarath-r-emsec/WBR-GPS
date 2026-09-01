@@ -109,6 +109,14 @@ target_link_libraries(test_concurrency PRIVATE wbr_gps_core util pthread)
 add_dependencies(test_concurrency wbr-gpsd)
 add_test(NAME concurrency COMMAND test_concurrency)
 
+add_executable(test_concurrency_lifecycle tests/test_concurrency_lifecycle.cpp)
+target_include_directories(test_concurrency_lifecycle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(test_concurrency_lifecycle PRIVATE
+  WBR_GPSD_PATH="${CMAKE_CURRENT_BINARY_DIR}/wbr-gpsd")
+target_link_libraries(test_concurrency_lifecycle PRIVATE wbr_gps_core util pthread)
+add_dependencies(test_concurrency_lifecycle wbr-gpsd)
+add_test(NAME concurrency_lifecycle COMMAND test_concurrency_lifecycle)
+
 # Guarantee G5, checked structurally rather than promised in a comment.
 add_test(NAME no_device_access
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_device_access.sh)
