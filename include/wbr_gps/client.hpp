@@ -3,6 +3,7 @@
 #include "wbr_gps/gps_types.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -36,6 +37,8 @@ public:
 private:
     void run();
     void mark_unavailable();
+    void note_nmea_callback_exception(const char* what);
+    void note_nmea_callback_ok();
 
     std::string             sock_path_;
     bool                    want_nmea_ = false;
@@ -45,6 +48,17 @@ private:
     mutable std::mutex      mu_;
     Snapshot                cached_;
     std::function<void(const std::string&)> nmea_cb_;
+
+    // T9-C: a one-shot latch bounding NMEA-callback-exception logging. A
+    // subscriber whose callback throws once will almost always throw on
+    // every subsequent sentence, so logging every occurrence at NMEA rate
+    // (tens per second) would fill a collection box's disk. Read and
+    // written only from run() (the background thread) -- no locking
+    // needed -- and deliberately NOT reset by a reconnect, so a
+    // permanently broken callback stays quiet after reconnecting rather
+    // than logging once per reconnect cycle.
+    bool     nmea_cb_broken_     = false;
+    uint64_t nmea_cb_suppressed_ = 0;
 };
 
 // One synchronous request. For startup checks such as an external-reference

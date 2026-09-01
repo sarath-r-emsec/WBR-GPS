@@ -135,6 +135,37 @@ void Client::mark_unavailable()
     cached_.gpsdo_locked   = false;
 }
 
+// T9-C: bounded logging for a misbehaving NMEA callback. A subscriber
+// whose callback throws once will almost always throw on every
+// subsequent sentence -- NMEA sentences arrive at roughly ten per
+// second, so unbounded per-occurrence logging would fill a collection
+// box's disk. Log the first occurrence with the exception text, then
+// suppress until the callback succeeds again, and report the suppressed
+// count exactly once on recovery so it is not silently lost. Deliberately
+// not reset by a reconnect (nmea_cb_broken_/nmea_cb_suppressed_ are
+// Client members, not local to run()'s per-connection scope): a
+// permanently broken callback must stay quiet across reconnects, not log
+// once per reconnect cycle.
+void Client::note_nmea_callback_exception(const char* what)
+{
+    if (!nmea_cb_broken_) {
+        std::fprintf(stderr, "[wbr_gps::Client] nmea callback threw: %s\n", what);
+        nmea_cb_broken_ = true;
+    } else {
+        ++nmea_cb_suppressed_;
+    }
+}
+
+void Client::note_nmea_callback_ok()
+{
+    if (!nmea_cb_broken_) return;
+    std::fprintf(stderr,
+        "[wbr_gps::Client] nmea callback recovered after %llu suppressed exception%s\n",
+        (unsigned long long)nmea_cb_suppressed_, nmea_cb_suppressed_ == 1 ? "" : "s");
+    nmea_cb_broken_     = false;
+    nmea_cb_suppressed_ = 0;
+}
+
 void Client::run()
 {
     int backoff = kReconnectMinMs;
@@ -201,12 +232,11 @@ void Client::run()
                         if (cb) {
                             try {
                                 cb(raw);
+                                note_nmea_callback_ok();
                             } catch (const std::exception& e) {
-                                std::fprintf(stderr,
-                                    "[wbr_gps::Client] nmea callback threw: %s\n", e.what());
+                                note_nmea_callback_exception(e.what());
                             } catch (...) {
-                                std::fprintf(stderr,
-                                    "[wbr_gps::Client] nmea callback threw a non-std::exception\n");
+                                note_nmea_callback_exception("non-std::exception");
                             }
                         }
                     }

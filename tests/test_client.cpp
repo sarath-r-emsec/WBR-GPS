@@ -318,6 +318,199 @@ static void test_nmea_callback_exception_does_not_crash_reader_thread()
     d.stop();
 }
 
+static void test_nmea_callback_exception_logging_is_bounded()
+{
+    // T9-C: a callback that throws on every sentence must not log once
+    // per sentence. This codebase already has a one-shot latch for
+    // exactly this reason elsewhere (src/main.cpp's serial_fail_logged);
+    // src/client.cpp's note_nmea_callback_exception()/note_nmea_callback_ok()
+    // mirror it. Redirect this process's own stderr to a temp file for
+    // the burst, then assert the property that matters: N sentences
+    // through a permanently-broken callback produce fewer than N log
+    // lines. Not an exact count -- that would be brittle.
+    PtyPair pty;
+    ASSERT_TRUE(pty.open_pair());
+    Daemon d;
+    d.start(pty.slave_path);
+
+    wbr_gps::Client c;
+    c.set_nmea_callback([](const std::string&) {
+        throw std::runtime_error("consumer callback blew up");
+    });
+    ASSERT_TRUE(c.start(d.sock, /*want_nmea=*/true));
+    usleep(300000);
+
+    char tmpl[] = "/tmp/wbrgps_stderr_capture_XXXXXX";
+    const int cap_fd = mkstemp(tmpl);
+    ASSERT_TRUE(cap_fd >= 0);
+    const int saved_stderr = dup(2);
+    ASSERT_TRUE(saved_stderr >= 0);
+    fflush(stderr);
+    dup2(cap_fd, 2);
+
+    const int kSentences = 40;
+    for (int i = 0; i < kSentences; ++i) {
+        pty.emit(kGGA);
+        usleep(50000);
+    }
+    usleep(300000);
+
+    fflush(stderr);
+    dup2(saved_stderr, 2);   // restore before anything else logs
+    close(saved_stderr);
+
+    lseek(cap_fd, 0, SEEK_SET);
+    std::string captured;
+    char       rbuf[4096];
+    ssize_t    n;
+    while ((n = read(cap_fd, rbuf, sizeof rbuf)) > 0) captured.append(rbuf, (size_t)n);
+    close(cap_fd);
+    unlink(tmpl);
+
+    size_t lines = 0;
+    for (const char ch : captured) if (ch == '\n') ++lines;
+
+    ASSERT_TRUE(lines < (size_t)kSentences);
+    ASSERT_TRUE(captured.find("nmea callback threw") != std::string::npos);
+
+    c.stop();
+    d.stop();
+}
+
+static void test_nmea_callback_non_std_exception_is_latched_too()
+{
+    // T9-C's first "thing to get right": a callback throwing a
+    // non-std::exception type must be caught by catch(...) and go
+    // through the SAME one-shot latch as the std::exception path, not an
+    // unbounded fallback.
+    PtyPair pty;
+    ASSERT_TRUE(pty.open_pair());
+    Daemon d;
+    d.start(pty.slave_path);
+
+    wbr_gps::Client c;
+    c.set_nmea_callback([](const std::string&) {
+        throw 42;   // deliberately not a std::exception
+    });
+    ASSERT_TRUE(c.start(d.sock, /*want_nmea=*/true));
+    usleep(300000);
+
+    char tmpl[] = "/tmp/wbrgps_stderr_capture2_XXXXXX";
+    const int cap_fd = mkstemp(tmpl);
+    ASSERT_TRUE(cap_fd >= 0);
+    const int saved_stderr = dup(2);
+    ASSERT_TRUE(saved_stderr >= 0);
+    fflush(stderr);
+    dup2(cap_fd, 2);
+
+    const int kSentences = 20;
+    for (int i = 0; i < kSentences; ++i) {
+        pty.emit(kGGA);
+        usleep(50000);
+    }
+    usleep(300000);
+
+    fflush(stderr);
+    dup2(saved_stderr, 2);
+    close(saved_stderr);
+
+    lseek(cap_fd, 0, SEEK_SET);
+    std::string captured;
+    char       rbuf[4096];
+    ssize_t    n;
+    while ((n = read(cap_fd, rbuf, sizeof rbuf)) > 0) captured.append(rbuf, (size_t)n);
+    close(cap_fd);
+    unlink(tmpl);
+
+    size_t lines = 0;
+    for (const char ch : captured) if (ch == '\n') ++lines;
+
+    ASSERT_TRUE(lines < (size_t)kSentences);
+    ASSERT_TRUE(captured.find("nmea callback threw: non-std::exception") != std::string::npos);
+    ASSERT_TRUE(c.snapshot().service_ok);
+
+    c.stop();
+    d.stop();
+}
+
+static void test_nmea_callback_latch_survives_reconnect()
+{
+    // T9-C's second "thing to get right": the latch must not be
+    // resettable by a reconnect alone. Trip it, force a daemon restart
+    // (same mechanism as test_client_reconnects_after_daemon_restart),
+    // then emit another sentence through the new connection and confirm
+    // no second "threw" line appears -- nmea_cb_broken_/nmea_cb_suppressed_
+    // are Client members, not local to run()'s per-connection scope.
+    PtyPair pty;
+    ASSERT_TRUE(pty.open_pair());
+    Daemon d;
+    d.start(pty.slave_path);
+
+    wbr_gps::Client c;
+    c.set_nmea_callback([](const std::string&) {
+        throw std::runtime_error("still broken");
+    });
+    ASSERT_TRUE(c.start(d.sock, /*want_nmea=*/true));
+    usleep(300000);
+
+    char tmpl[] = "/tmp/wbrgps_stderr_capture3_XXXXXX";
+    const int cap_fd = mkstemp(tmpl);
+    ASSERT_TRUE(cap_fd >= 0);
+    const int saved_stderr = dup(2);
+    ASSERT_TRUE(saved_stderr >= 0);
+    fflush(stderr);
+    dup2(cap_fd, 2);
+
+    pty.emit(kGGA);
+    usleep(500000);   // latch trips: exactly one "threw" line so far
+
+    const std::string sock = d.sock;
+    const std::string dir  = d.dir;
+    d.stop();
+    usleep(600000);
+
+    Daemon d2;
+    d2.dir  = dir;
+    d2.sock = sock;
+    d2.pid  = fork();
+    if (d2.pid == 0) {
+        execl(WBR_GPSD_PATH, "wbr-gpsd",
+              "--socket", sock.c_str(), "--lock", (dir + "/pid").c_str(),
+              "--serial", pty.slave_path.c_str(), "--group", "", (char*)nullptr);
+        _exit(127);
+    }
+    usleep(2500000);   // client backoff plus daemon startup
+
+    pty.emit(kGGA);
+    usleep(500000);
+
+    fflush(stderr);
+    dup2(saved_stderr, 2);
+    close(saved_stderr);
+
+    lseek(cap_fd, 0, SEEK_SET);
+    std::string captured;
+    char       rbuf[4096];
+    ssize_t    n;
+    while ((n = read(cap_fd, rbuf, sizeof rbuf)) > 0) captured.append(rbuf, (size_t)n);
+    close(cap_fd);
+    unlink(tmpl);
+
+    size_t threw_lines = 0;
+    size_t pos = 0;
+    while ((pos = captured.find("nmea callback threw", pos)) != std::string::npos) {
+        ++threw_lines;
+        pos += 1;
+    }
+
+    // Exactly one occurrence across the whole run, including the
+    // reconnect: the latch was never reset by reconnecting.
+    ASSERT_EQ(threw_lines, (size_t)1);
+
+    c.stop();
+    d2.stop();
+}
+
 static void test_stop_returns_promptly_when_peer_backlog_is_full()
 {
     // Investigation item: can stop() hang if the background thread is stuck
@@ -411,6 +604,9 @@ static void run_tests()
     test_get_once_returns_a_fix();
     test_nmea_callback_receives_raw_sentences_verbatim();
     test_nmea_callback_exception_does_not_crash_reader_thread();
+    test_nmea_callback_exception_logging_is_bounded();
+    test_nmea_callback_non_std_exception_is_latched_too();
+    test_nmea_callback_latch_survives_reconnect();
     test_stop_returns_promptly_when_peer_backlog_is_full();
     test_client_destroyed_without_stop_is_safe();
 }
