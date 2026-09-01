@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <signal.h>
+#include <stdexcept>
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -217,6 +219,105 @@ static void test_get_once_returns_a_fix()
     d.stop();
 }
 
+static void test_nmea_callback_receives_raw_sentences_verbatim()
+{
+    // T9-A: the raw NMEA path (want_nmea=true + set_nmea_callback) had no
+    // coverage at all. Task 16's gps_capture is the first real consumer,
+    // and it depends on raw subscribers getting the unfiltered stream --
+    // including sentences the parser itself rejects -- so this test emits
+    // one accepted sentence and one the parser rejects on checksum, and
+    // requires the callback to receive both, byte for byte.
+    static const char* kBadChecksum =
+        "$GNGGA,045519.50,1300.16956,N,07740.79521,E,1,04,1.33,921.8,M,-86.3,M,,*00";
+
+    PtyPair pty;
+    ASSERT_TRUE(pty.open_pair());
+    Daemon d;
+    d.start(pty.slave_path);
+
+    std::mutex               cb_mu;
+    std::vector<std::string> received;
+
+    wbr_gps::Client c;
+    c.set_nmea_callback([&](const std::string& raw) {
+        std::lock_guard<std::mutex> lk(cb_mu);
+        received.push_back(raw);
+    });
+    ASSERT_TRUE(c.start(d.sock, /*want_nmea=*/true));
+    usleep(300000);
+
+    pty.emit(kGGA);
+    pty.emit(kBadChecksum);
+    usleep(800000);
+
+    {
+        std::lock_guard<std::mutex> lk(cb_mu);
+        ASSERT_EQ(received.size(), (size_t)2);
+        if (received.size() >= 2) {
+            ASSERT_STREQ(received[0], kGGA);
+            ASSERT_STREQ(received[1], kBadChecksum);
+        }
+    }
+
+    // The rejected sentence reached the raw subscriber unfiltered, but it
+    // must not have corrupted the parsed FIX snapshot, which still stands
+    // on the one accepted sentence.
+    ASSERT_TRUE(c.snapshot().has_fix);
+
+    c.stop();
+
+    // No callback after stop() returns.
+    size_t count_after_stop;
+    {
+        std::lock_guard<std::mutex> lk(cb_mu);
+        count_after_stop = received.size();
+    }
+    pty.emit(kGGA);
+    usleep(500000);
+    {
+        std::lock_guard<std::mutex> lk(cb_mu);
+        ASSERT_EQ(received.size(), count_after_stop);
+    }
+
+    d.stop();
+}
+
+static void test_nmea_callback_exception_does_not_crash_reader_thread()
+{
+    // Investigation item: a subscriber's callback is arbitrary user code.
+    // If it throws and src/client.cpp did not contain it, the throw would
+    // escape run() -- a std::thread entry function -- which calls
+    // std::terminate() and takes down the whole process, not merely "the
+    // reader thread". Proven here, not assumed: if the throw were
+    // uncaught, the process would already be dead (SIGABRT) before any
+    // assertion below could run, and no further test in this binary would
+    // execute either.
+    PtyPair pty;
+    ASSERT_TRUE(pty.open_pair());
+    Daemon d;
+    d.start(pty.slave_path);
+
+    wbr_gps::Client c;
+    c.set_nmea_callback([](const std::string&) {
+        throw std::runtime_error("deliberate test exception");
+    });
+    ASSERT_TRUE(c.start(d.sock, /*want_nmea=*/true));
+    usleep(300000);
+
+    pty.emit(kGGA);
+    usleep(500000);
+
+    // The reader loop must still be alive and still processing FIX
+    // messages after the callback threw.
+    pty.emit(kGGA);
+    usleep(500000);
+    ASSERT_TRUE(c.snapshot().service_ok);
+    ASSERT_TRUE(c.snapshot().has_fix);
+
+    c.stop();
+    d.stop();
+}
+
 static void test_stop_returns_promptly_when_peer_backlog_is_full()
 {
     // Investigation item: can stop() hang if the background thread is stuck
@@ -308,6 +409,8 @@ static void run_tests()
     test_client_reconnects_after_daemon_restart();
     test_get_once_without_daemon_reports_unavailable();
     test_get_once_returns_a_fix();
+    test_nmea_callback_receives_raw_sentences_verbatim();
+    test_nmea_callback_exception_does_not_crash_reader_thread();
     test_stop_returns_promptly_when_peer_backlog_is_full();
     test_client_destroyed_without_stop_is_safe();
 }

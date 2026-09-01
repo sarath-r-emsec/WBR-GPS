@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -154,6 +155,10 @@ void Client::run()
                                 (want_nmea_ ? "true" : "false") + "}\n";
         if (!send_all(fd, sub)) { ::close(fd); mark_unavailable(); continue; }
 
+        // Deliberately uncapped: wbr-gpsd is a trusted local daemon on a
+        // Unix socket only root/the operator's group can reach, not an
+        // untrusted network peer, so bounding this against a malicious
+        // sender is not this library's job.
         std::string buf;
         int64_t last_msg_ms = now_mono_ms();
 
@@ -185,7 +190,25 @@ void Client::run()
                         json_get_string(line, "raw", raw)) {
                         std::function<void(const std::string&)> cb;
                         { std::lock_guard<std::mutex> lk(mu_); cb = nmea_cb_; }
-                        if (cb) cb(raw);
+                        // A subscriber's callback is arbitrary user code
+                        // (Task 16's gps_capture, for one). Run outside
+                        // mu_ so a reentrant snapshot() call from inside
+                        // the callback cannot deadlock, and contain any
+                        // exception here: an uncaught throw would escape
+                        // run(), which is a std::thread entry function --
+                        // that calls std::terminate() and takes down the
+                        // whole process, not just this thread.
+                        if (cb) {
+                            try {
+                                cb(raw);
+                            } catch (const std::exception& e) {
+                                std::fprintf(stderr,
+                                    "[wbr_gps::Client] nmea callback threw: %s\n", e.what());
+                            } catch (...) {
+                                std::fprintf(stderr,
+                                    "[wbr_gps::Client] nmea callback threw a non-std::exception\n");
+                            }
+                        }
                     }
                 }
                 continue;
