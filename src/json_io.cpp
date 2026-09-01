@@ -14,8 +14,9 @@ std::string escape(const std::string& s)
     std::string o;
     o.reserve(s.size() + 8);
     for (char c : s) {
-        if (c == '"' || c == '\\') { o += '\\'; o += c; }
-        else if ((unsigned char)c < 0x20)  { /* drop control bytes */ }
+        unsigned char uc = (unsigned char)c;
+        if (c == '"' || c == '\\')  { o += '\\'; o += c; }
+        else if (uc < 0x20 || uc >= 0x7F)  { /* drop control and high bytes */ }
         else                                { o += c; }
     }
     return o;

@@ -96,6 +96,31 @@ static void test_string_escaping()
     ASSERT_STREQ(raw, "$GN\"A\\B");
 }
 
+static void test_high_byte_filtering()
+{
+    // High bytes (>= 0x7F) must be dropped to ensure valid UTF-8.
+    // NMEA 0183 is ASCII-only; any byte >= 0x7F is corruption.
+    // Concatenate byte values as chars to create test string.
+    std::string input = "$GNGGA";
+    input += (char)0x81;  // high byte
+    input += "data";
+    input += (char)0xFF;  // high byte
+
+    const std::string js = wbr_gps::nmea_to_json(input, 0, 0);
+    std::string raw;
+    ASSERT_TRUE(wbr_gps::json_get_string(js, "raw", raw));
+
+    // Verify all bytes in output are < 0x80 (valid ASCII/UTF-8).
+    for (char c : raw) {
+        unsigned char uc = (unsigned char)c;
+        ASSERT_TRUE(uc < 0x80);
+    }
+
+    // Verify the ASCII parts survived intact.
+    ASSERT_TRUE(raw.find("$GNGGA") == 0);
+    ASSERT_TRUE(raw.find("data") != std::string::npos);
+}
+
 static void test_rejects_malformed()
 {
     wbr_gps::Snapshot b;
@@ -184,6 +209,7 @@ static void run_tests()
     test_class_field();
     test_nmea_message();
     test_string_escaping();
+    test_high_byte_filtering();
     test_rejects_malformed();
     test_scanner_helpers();
     test_non_finite_values();
