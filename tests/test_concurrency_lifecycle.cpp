@@ -92,6 +92,11 @@ static void S12_daemon_death_leaves_device_untouched()
     // that opened the port would show up here as a second opener even if it
     // reported every value correctly.
     ::usleep(3000000);
+
+    // Say whether this assertion can fail here BEFORE making it. An assertion
+    // that cannot fail is exactly what the FD_CLOEXEC defect taught this
+    // suite to distrust; one that announces its own latency is honest.
+    device_is_openable_now(pty.slave_path);
     ASSERT_EQ(fds_pointing_at(pty.slave_path, pty.slave), (size_t)0);
 
     for (auto& c : clients) c->stop();
@@ -150,8 +155,11 @@ static void S14_second_daemon_refuses_to_start()
     // Must exit non-zero rather than run alongside the first. Two daemons
     // fighting over one tty is the entire problem this program exists to end.
     ASSERT_TRUE(WIFEXITED(st));
-    ASSERT_TRUE(WEXITSTATUS(st) != 0);
-    ASSERT_TRUE(WEXITSTATUS(st) != 127);   // it ran; it did not fail to exec
+    // Exit 1 specifically -- the code main() returns when the singleton lock
+    // cannot be taken, and the same one S17 pins. "Non-zero" would also be
+    // satisfied by 2 (a rejected command line) or 127 (failed exec), so it
+    // would pass while proving the daemon never got as far as the lock.
+    ASSERT_EQ(WEXITSTATUS(st), 1);
 
     // The original must be unharmed.
     ASSERT_TRUE(wbr_gps::get_once(d.sock, 2000).service_ok);
@@ -250,11 +258,31 @@ static void S17_command_line_is_validated_not_coerced()
     // A well-formed command line that cannot take the singleton lock must
     // exit 1, not 0: exiting 0 would report success to systemd, and would
     // silently break any later switch to Restart=on-failure.
-    ASSERT_EQ(daemon_exit_status({ "--socket", "/nonexistent-dir/gpsd.sock",
+    //
+    // The socket path is WRITABLE and only the lock path is unreachable, so
+    // exit 1 can only have come from the lock. Pointing both at a missing
+    // directory would have let a failed bind produce the same 1 and prove
+    // nothing about the singleton.
+    char tmpl[] = "/tmp/wbrgps_cli_XXXXXX";
+    const char* made = ::mkdtemp(tmpl);
+    ASSERT_TRUE(made != nullptr);
+    if (made == nullptr) return;
+    const std::string dir  = made;
+    const std::string sock = dir + "/gpsd.sock";
+    g_temp_dirs.push_back(dir);
+
+    ASSERT_EQ(daemon_exit_status({ "--socket", sock,
                                    "--lock",   "/nonexistent-dir/pid",
                                    "--serial", "/dev/null",
                                    "--group",  "",
                                    "--foreground" }), 1);
+    // And nothing was bound: the lock is taken before the socket, so a daemon
+    // that reached listen_on() would have left this behind.
+    struct stat st {};
+    ASSERT_TRUE(::stat(sock.c_str(), &st) != 0);
+
+    reap_temp_dir(dir);
+    for (auto& x : g_temp_dirs) if (x == dir) x.clear();
 }
 
 static void run_tests()

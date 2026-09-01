@@ -25,7 +25,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <dirent.h>
+#include <fcntl.h>
 #include <functional>
 #include <memory>
 #include <signal.h>
@@ -378,3 +380,63 @@ inline int daemon_exit_status(const std::vector<std::string>& args)
     ::waitpid(p, &st, 0);
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
+
+// Report whether the structural half of S12 can actually fail on this
+// harness, and say so out loud either way.
+//
+// The assertion it guards -- that no descriptor in this process points at the
+// device once the daemon is dead -- is only meaningful if a fallback COULD
+// have created one. On a pty it often cannot: TIOCEXCL is a property of the
+// tty and is cleared only when the last descriptor on it closes, and the
+// harness holds the slave open, so a dead daemon's exclusivity outlives it
+// and the fallback open is refused before an fd can exist. The assertion then
+// passes whether or not the property holds, which is precisely the kind of
+// test this suite exists to distrust.
+//
+// Confirmed on real hardware: with the daemon alive a second open is refused
+// with errno 16, and after kill -9 the port is genuinely free and the open
+// succeeds. The premise is real; only the in-harness detector cannot see it.
+inline bool device_is_openable_now(const std::string& node)
+{
+    errno = 0;
+    const int fd = ::open(node.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    if (fd >= 0) {
+        ::close(fd);
+        fprintf(stderr,
+                "[S12] device is open-able with the daemon dead: the "
+                "structural assertion below is LIVE\n");
+        return true;
+    }
+    fprintf(stderr,
+            "[S12] LATENT: the device cannot be opened here (errno %d, %s), so "
+            "the structural assertion below cannot fail on this harness. That "
+            "is a pty artifact, not a property of the daemon -- verify on real "
+            "hardware.\n",
+            errno, std::strerror(errno));
+    return false;
+}
+
+// True when the daemon closes this connection within the timeout. Used to
+// assert that a protocol violation is answered by a DROP rather than by
+// unbounded buffering -- if the test closes the peer itself instead, a daemon
+// that happily buffered the whole over-long line passes identically.
+inline bool peer_closed_by_daemon(int fd, int timeout_ms)
+{
+    struct timeval tv { 0, 100 * 1000 };
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    char buf[512];
+    for (int waited = 0; waited < timeout_ms; waited += 100) {
+        const ssize_t n = ::recv(fd, buf, sizeof buf, 0);
+        if (n == 0) return true;                       // orderly close: dropped
+        if (n > 0) continue;                           // HELLO/ERROR, keep reading
+        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+        if (errno == EINTR) continue;
+        return true;                                   // ECONNRESET is a drop too
+    }
+    return false;
+}
+
+// A second position, so a test can tell a coherent snapshot from a torn one.
+// Checksum computed, not guessed: XOR of everything between '$' and '*'.
+inline const char* kGGA_B =
+    "$GNGGA,045520.50,1301.00000,N,07741.00000,E,1,04,1.33,921.8,M,-86.3,M,,*60";

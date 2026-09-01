@@ -9,6 +9,8 @@
 
 #include "concurrency_util.h"
 
+#include <cmath>
+
 // ---------- scenarios -------------------------------------------------------
 
 static void S1_single_get()
@@ -25,12 +27,29 @@ static void S1_single_get()
     d.stop();
 }
 
-static void S2_ten_simultaneous_gets_agree()
+static void S2_ten_simultaneous_gets_are_coherent_not_torn()
 {
     PtyPair& pty = new_pty(); ASSERT_TRUE(pty.open_pair());
     Daemon d; d.start(pty.slave_path);
     pty.emit(kGGA);
     ASSERT_TRUE(wait_until([&] { return wbr_gps::get_once(d.sock, 1000).has_fix; }, 3000));
+
+    // The device keeps talking WHILE the ten clients ask. Without this the
+    // scenario cannot fail: with the position frozen, ten identical answers
+    // are guaranteed by arithmetic rather than by anything the daemon does,
+    // and a daemon that tore snapshots in half would still pass.
+    //
+    // Two positions are alternated, so a torn answer is detectable: under the
+    // old scheme clients raced for bytes on the tty and could assemble a
+    // latitude from one sentence with a longitude from the next. Here every
+    // answer must be wholly one position or wholly the other.
+    std::atomic<bool> stop{ false };
+    std::thread emitter([&] {
+        for (int i = 0; !stop.load(); ++i) {
+            pty.emit((i % 2 == 0) ? kGGA_B : kGGA);
+            ::usleep(4000);
+        }
+    });
 
     std::vector<wbr_gps::Snapshot> results(10);
     std::vector<std::thread> ts;
@@ -38,15 +57,35 @@ static void S2_ten_simultaneous_gets_agree()
         ts.emplace_back([&, i] { results[i] = wbr_gps::get_once(d.sock, 2000); });
     }
     for (auto& t : ts) t.join();
+    stop = true;
+    emitter.join();
 
-    // Every client must succeed and see the SAME position. Under the old
-    // scheme they raced for bytes and disagreed.
+    const double lat_a = 13.0028260, lon_a = 77.6799202;
+    const double lat_b = 13.0166667, lon_b = 77.6833333;
+
+    int saw_a = 0, saw_b = 0;
     for (const auto& r : results) {
         ASSERT_TRUE(r.service_ok);
         ASSERT_TRUE(r.has_fix);
-        ASSERT_NEAR(r.lat, results[0].lat, 1e-12);
-        ASSERT_NEAR(r.lon, results[0].lon, 1e-12);
-        ASSERT_EQ(r.seq, results[0].seq);
+        // Wholly A or wholly B. A mixture is the failure this daemon exists
+        // to make impossible, and it is what the assertion below would catch.
+        const bool is_a = std::fabs(r.lat - lat_a) < 1e-6 && std::fabs(r.lon - lon_a) < 1e-6;
+        const bool is_b = std::fabs(r.lat - lat_b) < 1e-6 && std::fabs(r.lon - lon_b) < 1e-6;
+        ASSERT_TRUE(is_a || is_b);
+        if (is_a) ++saw_a;
+        if (is_b) ++saw_b;
+    }
+    ASSERT_EQ(saw_a + saw_b, 10);
+
+    // And equal sequence numbers must mean equal positions: seq identifies one
+    // state of the store, so two clients quoting the same seq that disagreed
+    // about where they are would mean the snapshot was not atomic.
+    for (size_t i = 0; i < results.size(); ++i) {
+        for (size_t j = i + 1; j < results.size(); ++j) {
+            if (results[i].seq != results[j].seq) continue;
+            ASSERT_NEAR(results[i].lat, results[j].lat, 1e-12);
+            ASSERT_NEAR(results[i].lon, results[j].lon, 1e-12);
+        }
     }
     d.stop();
 }
@@ -289,7 +328,12 @@ static void S10_malformed_input_is_survivable()
     const int fd2 = raw_connect(d.sock);
     ASSERT_TRUE(fd2 >= 0);
     send_line(fd2, std::string(9000, 'A'));
-    ::usleep(300000);
+
+    // The daemon must DROP this peer, not buffer it. Asserted rather than
+    // assumed: if the test simply closed the connection itself, a daemon that
+    // grew its request buffer without bound would pass this scenario exactly
+    // as a correct one does.
+    ASSERT_TRUE(peer_closed_by_daemon(fd2, 3000));
     ::close(fd2);
 
     ASSERT_TRUE(wbr_gps::get_once(d.sock, 2000).service_ok);
@@ -304,7 +348,7 @@ static void run_tests()
     std::atexit(cleanup_everything);
 
     S1_single_get();
-    S2_ten_simultaneous_gets_agree();
+    S2_ten_simultaneous_gets_are_coherent_not_torn();
     S3_fifty_watchers_all_receive();
     S4_mixed_modes_concurrently();
     S5_late_joiner_gets_snapshot_immediately();
