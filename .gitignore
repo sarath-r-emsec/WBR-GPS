@@ -1,0 +1,7 @@
+build/
+build-cov/
+*.o
+*.gcda
+*.gcno
+*.info
+__pycache__/
