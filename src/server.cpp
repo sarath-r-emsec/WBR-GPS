@@ -70,7 +70,16 @@ Server::~Server() { shutdown(); }
 
 bool Server::acquire_singleton(const std::string& lock_path)
 {
-    if (lock_fd_ >= 0) return true;          // already held by this instance
+    if (lock_fd_ >= 0) {
+        // Already holding a lock. Same path: idempotent success. Different
+        // path: we hold nothing there, and saying otherwise would let a
+        // caller believe it had won a lock it never took. T7-C.
+        if (lock_path_ == lock_path) return true;
+        std::fprintf(stderr,
+                     "[wbr-gpsd] already holding %s, refusing to claim %s\n",
+                     lock_path_.c_str(), lock_path.c_str());
+        return false;
+    }
 
     const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) {
@@ -87,7 +96,8 @@ bool Server::acquire_singleton(const std::string& lock_path)
         ::close(fd);
         return false;
     }
-    lock_fd_ = fd;
+    lock_fd_   = fd;
+    lock_path_ = lock_path;
 
     char pid[32];
     const int n = std::snprintf(pid, sizeof pid, "%d\n", (int)::getpid());
@@ -221,6 +231,18 @@ bool Server::drop_oldest(Client& c)
 
 size_t Server::enqueue(Client& c, const std::string& line)
 {
+    // T7-A. Every message boundary in this queue is located with find('\n'):
+    // first_editable(), drop_oldest() and the in-place FIX replace all depend
+    // on it. A line carrying an embedded newline would make drop_oldest()
+    // erase half a message and splice the wire -- the exact corruption this
+    // class exists to prevent. json_io's escape() strips control bytes today,
+    // so nothing can reach here with one, but that is another file's
+    // invariant. This boundary holds on its own.
+    if (line.find('\n') != std::string::npos) {
+        ++c.dropped;
+        return std::string::npos;
+    }
+
     const size_t need = line.size() + 1;
     if (need > kMaxQueueBytes) {
         // A single message larger than the entire budget. Refuse it rather
@@ -421,6 +443,7 @@ void Server::shutdown()
     if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
     if (!sock_path_.empty()) { ::unlink(sock_path_.c_str()); sock_path_.clear(); }
     if (lock_fd_ >= 0) { ::close(lock_fd_); lock_fd_ = -1; }
+    lock_path_.clear();
 }
 
 } // namespace wbr_gps

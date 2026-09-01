@@ -68,7 +68,12 @@ target_include_directories(test_hid_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/t
 target_link_libraries(test_hid_source PRIVATE wbr_gps_core util)
 add_test(NAME hid_source COMMAND test_hid_source)
 
-add_executable(test_server tests/test_server.cpp)
-target_include_directories(test_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(test_server PRIVATE wbr_gps_core)
-add_test(NAME server COMMAND test_server)
+add_executable(test_server_protocol tests/test_server_protocol.cpp)
+target_include_directories(test_server_protocol PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_server_protocol PRIVATE wbr_gps_core)
+add_test(NAME server_protocol COMMAND test_server_protocol)
+
+add_executable(test_server_backpressure tests/test_server_backpressure.cpp)
+target_include_directories(test_server_backpressure PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_server_backpressure PRIVATE wbr_gps_core)
+add_test(NAME server_backpressure COMMAND test_server_backpressure)

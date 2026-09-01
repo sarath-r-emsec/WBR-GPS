@@ -36,10 +36,22 @@ public:
     // With EPOLLET a client would stall holding unread bytes.
     static constexpr int    kMaxReadsPerEvent = 16;
 
+    Server() = default;
     ~Server();
 
+    // T7-B, rule of three. This object owns the listening fd, the lock fd and
+    // every client fd. A copy would double-close descriptors the process may
+    // have since reissued to something else, and double-unlink the socket.
+    // Declaring the destructor already suppresses the implicit moves, so
+    // Server is neither copyable nor movable.
+    Server(const Server&)            = delete;
+    Server& operator=(const Server&) = delete;
+
     // flock() a pidfile so a second daemon cannot start. Returns false if
-    // another instance holds it.
+    // another instance holds it. Calling it again with the same path is a
+    // no-op that returns true; calling it with a *different* path returns
+    // false, because this Server holds no lock on that path and must not
+    // report one it does not hold.
     bool acquire_singleton(const std::string& lock_path);
 
     // Bind and listen. If `group` is non-null, chown the socket to it. A
@@ -51,7 +63,10 @@ public:
     void drop_client(int fd);
     size_t client_count() const { return clients_.size(); }
 
-    // Read and handle requests. Returns false when the peer has gone away.
+    // Read and handle requests. Returns false when this client must be
+    // dropped -- either the peer has gone away, or it broke the protocol
+    // (an over-long request line) and we are dropping it deliberately.
+    // The caller must call drop_client(fd) on false.
     bool on_client_readable(int fd, StateStore& store, int64_t now_mono_ms);
 
     // Enqueue to every subscriber. Never blocks.
@@ -66,6 +81,13 @@ public:
     void shutdown();
 
 private:
+    // Lets the test suite drive enqueue() directly. The newline guard it
+    // enforces is unreachable through the public API today because json_io's
+    // escape() already strips control bytes -- which is exactly why the guard
+    // must be proven to fire rather than inferred from another file's
+    // behaviour. See T7-A.
+    friend struct ServerTestAccess;
+
     struct Client {
         std::string in;         // partial request line
         std::string out;        // pending output bytes
@@ -101,6 +123,7 @@ private:
     int         listen_fd_ = -1;
     int         lock_fd_   = -1;
     std::string sock_path_;
+    std::string lock_path_;    // path lock_fd_ was taken on; see T7-C
     std::map<int, Client> clients_;
 };
 
