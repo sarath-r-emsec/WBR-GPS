@@ -29,6 +29,7 @@ add_library(wbr_gps_core STATIC
   src/device_presence.cpp
   src/hid_source.cpp
   src/server.cpp
+  src/client.cpp
 )
 
 enable_testing()
@@ -82,3 +83,13 @@ add_test(NAME server_backpressure COMMAND test_server_backpressure)
 add_executable(wbr-gpsd src/main.cpp)
 target_link_libraries(wbr-gpsd PRIVATE wbr_gps_core)
 install(TARGETS wbr-gpsd RUNTIME DESTINATION bin)
+
+# Client library test: launches the real wbr-gpsd against a pty, so it
+# exercises the actual wire protocol rather than a stub.
+add_executable(test_client tests/test_client.cpp)
+target_include_directories(test_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(test_client PRIVATE
+  WBR_GPSD_PATH="${CMAKE_CURRENT_BINARY_DIR}/wbr-gpsd")
+target_link_libraries(test_client PRIVATE wbr_gps_core util pthread)
+add_dependencies(test_client wbr-gpsd)
+add_test(NAME client COMMAND test_client)
