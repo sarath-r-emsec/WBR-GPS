@@ -22,6 +22,20 @@ struct PtyPair {
         char name[256];
         if (openpty(&master, &slave, name, nullptr, nullptr) != 0) return false;
         slave_path = name;
+
+        // Close-on-exec, and this is load-bearing rather than tidy.
+        //
+        // Tests in this project fork and exec the real wbr-gpsd. openpty()
+        // returns descriptors WITHOUT FD_CLOEXEC, so without these two calls
+        // the daemon inherits the master -- and a pty hangs up only when the
+        // last master descriptor closes. The test would then close its own
+        // master, believe it had unplugged the device, and watch the daemon
+        // go on reading happily from a port the test thought was gone. Every
+        // unplug and reconnect scenario silently tests nothing.
+        //
+        // The daemon opens the slave by path, which is unaffected.
+        ::fcntl(master, F_SETFD, FD_CLOEXEC);
+        ::fcntl(slave,  F_SETFD, FD_CLOEXEC);
         return true;
     }
 
@@ -38,6 +52,24 @@ struct PtyPair {
     {
         ssize_t rc = ::write(master, bytes.data(), bytes.size());
         (void)rc;
+    }
+
+    // Hang up WITHOUT releasing the pts index: this is what an unplug
+    // actually is -- the device side goes away -- and the slave descriptor
+    // the harness holds is a pty artifact with no counterpart in hardware.
+    //
+    // Keeping it open matters. A pts index is recycled the instant it is
+    // free, and a tty that a previous exclusive owner (TIOCEXCL) has touched
+    // can hand the next opener of the same index an EBUSY that has nothing
+    // to do with the code under test. Holding the slave pins the index so no
+    // later pty can inherit that confusion.
+    //
+    // Measured: with the master closed and this descriptor still open, the
+    // slave reports revents=0x19 (POLLIN|POLLERR|POLLHUP) -- the daemon sees
+    // the hangup exactly as it would from a yanked cable.
+    void hangup()
+    {
+        if (master >= 0) { ::close(master); master = -1; }
     }
 
     void close_pair()

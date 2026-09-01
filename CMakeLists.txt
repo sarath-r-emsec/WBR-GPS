@@ -79,6 +79,13 @@ target_include_directories(test_server_backpressure PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(test_server_backpressure PRIVATE wbr_gps_core)
 add_test(NAME server_backpressure COMMAND test_server_backpressure)
 
+add_executable(test_client_table tests/test_client_table.cpp)
+target_include_directories(test_client_table PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_client_table PRIVATE wbr_gps_core)
+add_test(NAME client_table COMMAND test_client_table)
+
 # The daemon. Everything it needs is in wbr_gps_core; main.cpp is wiring only.
 add_executable(wbr-gpsd src/main.cpp)
 target_link_libraries(wbr-gpsd PRIVATE wbr_gps_core)
@@ -93,3 +100,15 @@ target_compile_definitions(test_client PRIVATE
 target_link_libraries(test_client PRIVATE wbr_gps_core util pthread)
 add_dependencies(test_client wbr-gpsd)
 add_test(NAME client COMMAND test_client)
+
+add_executable(test_concurrency tests/test_concurrency.cpp)
+target_include_directories(test_concurrency PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_definitions(test_concurrency PRIVATE
+  WBR_GPSD_PATH="${CMAKE_CURRENT_BINARY_DIR}/wbr-gpsd")
+target_link_libraries(test_concurrency PRIVATE wbr_gps_core util pthread)
+add_dependencies(test_concurrency wbr-gpsd)
+add_test(NAME concurrency COMMAND test_concurrency)
+
+# Guarantee G5, checked structurally rather than promised in a comment.
+add_test(NAME no_device_access
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_device_access.sh)

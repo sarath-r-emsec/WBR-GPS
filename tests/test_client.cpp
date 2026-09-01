@@ -53,7 +53,21 @@ struct Daemon {
         if (pid > 0) { kill(pid, SIGTERM); int st = 0; waitpid(pid, &st, 0); pid = -1; }
     }
 
-    ~Daemon() { stop(); }
+    // Runs on every exit path, assertion failures included. Without this each
+    // run of this suite left one /tmp/wbrgps_client_* directory behind
+    // forever; several hundred had accumulated before anyone noticed, and a
+    // soak test that measures fd or inode pressure is worthless from a
+    // polluted baseline.
+    ~Daemon()
+    {
+        stop();
+        if (!dir.empty()) {
+            ::unlink(sock.c_str());
+            ::unlink((dir + "/pid").c_str());
+            ::rmdir(dir.c_str());
+            dir.clear();
+        }
+    }
 };
 
 static void test_snapshot_tracks_daemon()
@@ -559,6 +573,7 @@ static void test_stop_returns_promptly_when_peer_backlog_is_full()
     for (const int ffd : fillers) ::close(ffd);
     ::close(lfd);
     ::unlink(sock.c_str());
+    ::rmdir(dir.c_str());     // the socket was removed above; take the dir too
 }
 
 static void test_client_destroyed_without_stop_is_safe()
