@@ -50,6 +50,11 @@ def get_once(sock_path=DEFAULT_SOCKET, timeout=0.5):
     Always returns a dict; never raises. A Unix-socket round trip is
     sub-millisecond, so this is safe to call directly from a request thread
     without the background-refresh cache the old probe needed.
+
+    Note: timeout bounds each individual recv() call, not the total wall-clock
+    time, so a slow-trickling peer could block longer than the stated value.
+    This is acceptable against a local cooperative daemon, but callers should
+    be aware of this property.
     """
     sock = None
     try:
@@ -72,15 +77,16 @@ def get_once(sock_path=DEFAULT_SOCKET, timeout=0.5):
                     msg = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
                     continue
+                # Guard against non-dict JSON: bare number, string, null, array, bool.
                 # Skip HELLO and anything else; only a FIX is an answer.
-                if msg.get("class") == "FIX":
+                if isinstance(msg, dict) and msg.get("class") == "FIX":
                     snap = dict(_UNAVAILABLE)
                     snap.update(msg)
                     snap["service_ok"] = True
                     snap.pop("class", None)
                     return snap
         return dict(_UNAVAILABLE)
-    except (OSError, socket.timeout):
+    except (OSError, socket.timeout, AttributeError, TypeError):
         return dict(_UNAVAILABLE)
     finally:
         if sock is not None:
