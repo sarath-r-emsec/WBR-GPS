@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Send one request to wbr-gpsd and print the reply lines.
+
+A debugging convenience, not part of the product: stdlib only, no install.
+It exists because socat is not available everywhere we need to poke at the
+socket.
+
+  gpsq /run/wbr-gps/gpsd.sock '{"op":"get"}'
+  gpsq /tmp/wbrgps/gpsd.sock '{"op":"watch","nmea":true}' 5
+"""
+
+import socket
+import sys
+import time
+
+DEFAULT_SECONDS = 1.0
+
+
+def main(argv):
+    if len(argv) < 3:
+        print('usage: gpsq SOCKET REQUEST_JSON [SECONDS]', file=sys.stderr)
+        return 2
+
+    path, request = argv[1], argv[2]
+    seconds = float(argv[3]) if len(argv) > 3 else DEFAULT_SECONDS
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(seconds)
+    try:
+        sock.connect(path)
+    except OSError as exc:
+        print('connect %s: %s' % (path, exc), file=sys.stderr)
+        return 1
+
+    sock.sendall((request + '\n').encode())
+
+    deadline = time.monotonic() + seconds
+    buf = b''
+    lines = 0
+    while time.monotonic() < deadline:
+        sock.settimeout(max(0.01, deadline - time.monotonic()))
+        try:
+            chunk = sock.recv(65536)
+        except socket.timeout:
+            break
+        except OSError as exc:
+            print('recv: %s' % exc, file=sys.stderr)
+            break
+        if not chunk:
+            break
+        buf += chunk
+        while b'\n' in buf:
+            line, buf = buf.split(b'\n', 1)
+            print(line.decode('utf-8', 'replace'))
+            lines += 1
+    sock.close()
+    return 0 if lines else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

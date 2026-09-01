@@ -77,3 +77,8 @@ add_executable(test_server_backpressure tests/test_server_backpressure.cpp)
 target_include_directories(test_server_backpressure PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_server_backpressure PRIVATE wbr_gps_core)
 add_test(NAME server_backpressure COMMAND test_server_backpressure)
+
+# The daemon. Everything it needs is in wbr_gps_core; main.cpp is wiring only.
+add_executable(wbr-gpsd src/main.cpp)
+target_link_libraries(wbr-gpsd PRIVATE wbr_gps_core)
+install(TARGETS wbr-gpsd RUNTIME DESTINATION bin)
