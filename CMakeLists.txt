@@ -22,6 +22,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Shared between the daemon and the client library.
 add_library(wbr_gps_core STATIC
   src/gps_types.cpp
+  src/nmea_parser.cpp
 )
 
 enable_testing()
@@ -30,3 +31,8 @@ add_executable(test_types tests/test_types.cpp)
 target_include_directories(test_types PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_types PRIVATE wbr_gps_core)
 add_test(NAME types COMMAND test_types)
+
+add_executable(test_nmea_parser tests/test_nmea_parser.cpp)
+target_include_directories(test_nmea_parser PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_nmea_parser PRIVATE wbr_gps_core)
+add_test(NAME nmea_parser COMMAND test_nmea_parser)
