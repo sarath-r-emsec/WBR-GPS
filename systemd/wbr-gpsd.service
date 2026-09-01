@@ -1,0 +1,73 @@
+[Unit]
+Description=WBR GPS proxy daemon (single owner of the Leo Bodnar GPSDO)
+Documentation=file:/home/sigint-4/prefix/src/WBR-GPS/docs/superpowers/specs/2026-09-01-gps-proxy-daemon-design.md
+# The daemon binds its socket before it opens the serial port on its first
+# event-loop tick, so there is a sub-second window at startup where a stray
+# reader could take the device first. If that happens the daemon reports
+# serial_ok=false honestly and retries with backoff -- an honest wrong
+# answer beats a silent one -- but After=/Wants= on udev-settle still
+# matters: it gets /dev/gpsdo created by the udev rule before the daemon's
+# first attempt to open it, which is the difference between "retries once"
+# and "retries forever because the symlink never appears".
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wbr-gpsd --socket /run/wbr-gps/gpsd.sock --lock /run/wbr-gps/wbr-gpsd.pid --group dialout
+
+# Not on-failure: the daemon's normal exit codes are 1 for a fatal loop
+# error and 0 for a clean SIGTERM (see src/main.cpp), so either restart
+# policy would technically catch the crash case. `always` is deliberate
+# anyway -- it is what the rest of the design assumes (G5: the daemon is
+# always running) -- so a future clean-shutdown path added for some other
+# reason doesn't silently stop being supervised.
+Restart=always
+RestartSec=2
+
+# The socket and pidfile live here; systemd creates and cleans it up.
+RuntimeDirectory=wbr-gps
+RuntimeDirectoryMode=0755
+
+# Runs as root, not as a dedicated service account: no such account exists
+# yet (creating one is out of scope for Task 11), and root sidesteps a real
+# startup race -- if /dev/gpsdo's udev-applied group ownership hasn't landed
+# by the time the daemon opens it, a non-root user could hit a transient
+# EACCES that root never sees. Group=dialout is what matters day to day: it
+# sets the primary group the daemon runs with, so its own chown() of the
+# socket in server.cpp (to GROUP="dialout", see --group above) succeeds
+# without needing CAP_CHOWN, and NoNewPrivileges/ProtectSystem=strict/
+# ProtectHome/PrivateTmp/PrivateNetwork below are what keep root's blast
+# radius small. Revisit if a dedicated system account is ever provisioned.
+User=root
+Group=dialout
+
+# Hardening. The daemon needs /dev, a Unix socket and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# The daemon has no network transport by design (src/server.cpp only ever
+# talks AF_UNIX); both of these lines tell the kernel to enforce that
+# rather than trusting the code never to grow one by accident. If a TCP
+# listener is ever added, BOTH lines must change together, or the daemon
+# will fail to bind and looks broken instead of deliberately sandboxed.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+
+# Arithmetic, so this number and the client cap it depends on never drift
+# apart silently (see kMaxClients in src/main.cpp, which carries the same
+# sum from the other direction):
+#   kMaxClients (src/main.cpp)        = 64
+#   Server::kMaxQueueBytes (server.hpp) = 64 KiB per client
+#   worst case queue memory  = 64 * 64 KiB = 4096 KiB = 4 MiB
+#   4 MiB / 64 MiB ceiling   = 0.0625 = 6.25% of MemoryMax
+# The other 93.75% covers the binary, its heap, and the state store. If you
+# raise kMaxClients, raise MemoryMax to match or the daemon can be OOM-
+# killed by its own cgroup before it exhausts file descriptors; if you
+# lower MemoryMax, re-check this arithmetic first.
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+# Leo Bodnar LBE-1421 GPSDO, owned exclusively by wbr-gpsd.
+
+# 1. Stop ModemManager probing the GPSDO as a modem. Without this, MM opens
+#    /dev/ttyACM0 and writes AT command strings at it on every hotplug —
+#    udevadm reports ID_MM_CANDIDATE=1 for this device. That is a fifth
+#    uninvited reader and a real source of startup flakiness.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1dd2", ATTRS{idProduct}=="2444", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# 2. Stable symlink, so the daemon never has to guess a path and survives
+#    ttyACM0 -> ttyACM1 renumbering across replug.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1dd2", ATTRS{idProduct}=="2444", SYMLINK+="gpsdo", GROUP="dialout", MODE="0660"
+
+# 3. Non-root access to the Leo Bodnar HID interface. This supersedes the
+#    existing /etc/udev/rules.d/99-leobodnar.rules, which sets MODE 0666 for
+#    all of vendor 1dd2; 0660 with a group is tighter and sufficient.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1dd2", GROUP="dialout", MODE="0660"
