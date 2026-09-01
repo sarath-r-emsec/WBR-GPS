@@ -13,8 +13,16 @@ namespace {
 constexpr int64_t kBackoffMin = 250;
 constexpr int64_t kBackoffMax = 5000;
 constexpr const char* kHidrawClassDir = "/sys/class/hidraw";
-constexpr const char* kLeoVendorId = "1DD2";
+constexpr const char* kHidIdPrefix = "HID_ID=";
+constexpr const char* kLeoVendorSeg = ":00001DD2:";
 } // namespace
+
+bool hid_decode_lock(const unsigned char* rep, ssize_t n)
+{
+    if (n < 2) return false;
+    // Bit 0 clear means locked, matching the existing WBR-SA reader.
+    return (rep[1] & 0x01) == 0;
+}
 
 std::string HidSource::discover()
 {
@@ -36,7 +44,12 @@ std::string HidSource::discover()
         bool match = false;
         while (std::fgets(line, sizeof line, f)) {
             // HID_ID=0003:00001DD2:00002444
-            if (std::strstr(line, kLeoVendorId) != nullptr) { match = true; break; }
+            // Anchor on HID_ID= and check for the vendor segment with colons.
+            // This prevents false positives from other fields containing these digits.
+            if (std::strstr(line, kHidIdPrefix) && std::strstr(line, kLeoVendorSeg)) {
+                match = true;
+                break;
+            }
         }
         std::fclose(f);
 
@@ -68,8 +81,7 @@ bool HidSource::on_readable(StateStore& store)
     for (;;) {
         const ssize_t n = ::read(fd_, rep, sizeof rep);
         if (n >= 2) {
-            // Bit 0 clear means locked, matching the existing WBR-SA reader.
-            store.set_gpsdo_locked((rep[1] & 0x01) == 0);
+            store.set_gpsdo_locked(hid_decode_lock(rep, n));
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;

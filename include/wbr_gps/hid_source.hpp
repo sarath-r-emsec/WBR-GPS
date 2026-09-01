@@ -7,6 +7,12 @@
 
 namespace wbr_gps {
 
+// Decode GPSDO lock state from a hidraw status report.
+// Byte 1, bit 0: 0 means locked, 1 means unlocked.
+// Precondition: rep must point to at least n bytes; caller must verify n >= 2.
+// Returns false (unlocked) if n < 2 (caller should not use the result).
+bool hid_decode_lock(const unsigned char* rep, ssize_t n);
+
 // Owns the Leo Bodnar hidraw device. The 2-byte status report's byte 1 bit 0
 // is the GPSDO lock bit (0 means locked). This is a genuinely different
 // signal from NMEA fix: the clock can be locked with no current GGA.

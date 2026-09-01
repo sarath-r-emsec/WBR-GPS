@@ -61,3 +61,8 @@ add_executable(test_device_presence tests/test_device_presence.cpp)
 target_include_directories(test_device_presence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_device_presence PRIVATE wbr_gps_core)
 add_test(NAME device_presence COMMAND test_device_presence)
+
+add_executable(test_hid_source tests/test_hid_source.cpp)
+target_include_directories(test_hid_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_hid_source PRIVATE wbr_gps_core util)
+add_test(NAME hid_source COMMAND test_hid_source)
