@@ -24,6 +24,7 @@ add_library(wbr_gps_core STATIC
   src/gps_types.cpp
   src/nmea_parser.cpp
   src/json_io.cpp
+  src/state_store.cpp
 )
 
 enable_testing()
@@ -42,3 +43,8 @@ add_executable(test_json_io tests/test_json_io.cpp)
 target_include_directories(test_json_io PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_json_io PRIVATE wbr_gps_core)
 add_test(NAME json_io COMMAND test_json_io)
+
+add_executable(test_state_store tests/test_state_store.cpp)
+target_include_directories(test_state_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_state_store PRIVATE wbr_gps_core)
+add_test(NAME state_store COMMAND test_state_store)
