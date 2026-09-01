@@ -26,6 +26,7 @@
 #include "test_util.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -358,6 +359,29 @@ struct SerialLink {
         }
     }
 };
+
+// Run the daemon to completion with these arguments and return its exit
+// status, or -1 if it did not exit normally. Used only for command lines that
+// are meant to be refused -- a valid one would never return.
+static int daemon_exit_status(const std::vector<std::string>& args)
+{
+    const pid_t p = ::fork();
+    if (p == 0) {
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>("wbr-gpsd"));
+        for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        // The usage text is not what is under test, and printing it for every
+        // case would bury the real output of this suite.
+        if (std::freopen("/dev/null", "w", stdout) == nullptr) _exit(126);
+        if (std::freopen("/dev/null", "w", stderr) == nullptr) _exit(126);
+        ::execv(WBR_GPSD_PATH, argv.data());
+        _exit(127);
+    }
+    int st = 0;
+    ::waitpid(p, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
 
 // ---------- scenarios -------------------------------------------------------
 
@@ -855,6 +879,44 @@ static void S16_repeated_reconnect_leaks_no_descriptors()
     d.stop();
 }
 
+// S17 is not a concurrency scenario, and it is here because main.cpp had no
+// CI-checked coverage of any kind before this suite existed. Argument
+// handling is the part of it a test can reach in milliseconds, and it guards
+// a hazard the file calls out in its own comments: a bad --baud must be
+// REJECTED, never coerced, because atoi() would turn a typo into baud 0 and
+// the daemon would then open the port at the driver default and quietly
+// decode nothing.
+static void S17_command_line_is_validated_not_coerced()
+{
+    // --help is a request, so it succeeds; a bad argument is a diagnostic,
+    // so it fails with 2. Neither may start a daemon.
+    ASSERT_EQ(daemon_exit_status({ "--help" }), 0);
+    ASSERT_EQ(daemon_exit_status({ "-h" }), 0);
+
+    ASSERT_EQ(daemon_exit_status({ "--nonsense" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--baud" }), 2);            // missing value
+    ASSERT_EQ(daemon_exit_status({ "--socket" }), 2);          // missing value
+
+    // Every one of these would be silently accepted by atoi().
+    ASSERT_EQ(daemon_exit_status({ "--baud", "0" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--baud", "-1" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--baud", "abc" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--baud", "115200x" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--baud", "99999999" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--stale-ms", "0" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--stale-ms", "-1" }), 2);
+    ASSERT_EQ(daemon_exit_status({ "--stale-ms", "junk" }), 2);
+
+    // A well-formed command line that cannot take the singleton lock must
+    // exit 1, not 0: exiting 0 would report success to systemd, and would
+    // silently break any later switch to Restart=on-failure.
+    ASSERT_EQ(daemon_exit_status({ "--socket", "/nonexistent-dir/gpsd.sock",
+                                   "--lock",   "/nonexistent-dir/pid",
+                                   "--serial", "/dev/null",
+                                   "--group",  "",
+                                   "--foreground" }), 1);
+}
+
 static void run_tests()
 {
     // This suite writes to sockets whose peers vanish on purpose. Without
@@ -878,6 +940,7 @@ static void run_tests()
     S14_second_daemon_refuses_to_start();
     S15_stale_socket_does_not_block_startup();
     S16_repeated_reconnect_leaks_no_descriptors();
+    S17_command_line_is_validated_not_coerced();
 
     cleanup_everything();
 }

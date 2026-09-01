@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Line coverage for src/, from gcov, with no lcov or gcovr required.
+
+Neither lcov nor gcovr is installed here and installing them needs a password,
+so this walks the .gcda files gcc leaves beside each object and adds the
+results up itself. gcov IS available, and it is the thing lcov wraps.
+
+  tools/coverage-summary [BUILD_DIR] [--target PERCENT] [--all]
+
+BUILD_DIR defaults to build-cov and must have been configured with
+-DWBR_GPS_COVERAGE=ON and then exercised (ctest), or there will be no .gcda
+files to read.
+
+Exits non-zero if total src/ coverage is below the target, so this can be
+wired into CI as a gate rather than read by eye.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+DEFAULT_BUILD = "build-cov"
+DEFAULT_TARGET = 80.0
+
+# gcov line format: "<count>:<line number>:<source text>", where the count is
+# "-" for a line that generates no code and "#####" (or "=====" for an
+# unexecuted block) for one that does and never ran.
+LINE_RE = re.compile(r"^\s*([^:]+):\s*(\d+):")
+
+
+def repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def find_gcda(build_dir):
+    out = []
+    for dirpath, _dirnames, filenames in os.walk(build_dir):
+        for name in filenames:
+            if name.endswith(".gcda"):
+                out.append(os.path.join(dirpath, name))
+    return sorted(out)
+
+
+def run_gcov(gcda_files, workdir):
+    """Run gcov over every .gcda, leaving .gcov files in workdir."""
+    for gcda in gcda_files:
+        subprocess.run(
+            ["gcov", "--preserve-paths", "--object-directory",
+             os.path.dirname(gcda), gcda],
+            cwd=workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def parse_gcov(workdir):
+    """Merge every .gcov into {source path: {line: covered}}.
+
+    Merged rather than summed: a header included by several objects produces
+    one .gcov per object, and a line executed by any of them is covered. Adding
+    the files up instead would count the same line several times and inflate
+    the total.
+    """
+    merged = {}
+    for name in sorted(os.listdir(workdir)):
+        if not name.endswith(".gcov"):
+            continue
+        path = os.path.join(workdir, name)
+        source = None
+        try:
+            with open(path, "r", errors="replace") as fh:
+                for raw in fh:
+                    if source is None and "0:Source:" in raw:
+                        source = raw.split("0:Source:", 1)[1].strip()
+                        continue
+                    m = LINE_RE.match(raw)
+                    if not m or source is None:
+                        continue
+                    count, lineno = m.group(1).strip(), int(m.group(2))
+                    if lineno == 0 or count == "-":
+                        continue          # not an executable line
+                    covered = not (count.startswith("#") or count.startswith("="))
+                    lines = merged.setdefault(source, {})
+                    lines[lineno] = lines.get(lineno, False) or covered
+        except OSError as exc:
+            print("warning: could not read %s: %s" % (path, exc), file=sys.stderr)
+    return merged
+
+
+def classify(source, root):
+    """Return the repo-relative path, or None for anything not ours."""
+    path = source if os.path.isabs(source) else os.path.abspath(
+        os.path.join(root, source))
+    path = os.path.normpath(path)
+    if not path.startswith(root + os.sep):
+        return None                       # /usr/include and friends
+    return os.path.relpath(path, root)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("build_dir", nargs="?", default=DEFAULT_BUILD)
+    ap.add_argument("--target", type=float, default=DEFAULT_TARGET,
+                    help="minimum total line coverage for src/ (default 80)")
+    ap.add_argument("--all", action="store_true",
+                    help="also list headers and test files, which are not gated")
+    args = ap.parse_args(argv[1:])
+
+    if shutil.which("gcov") is None:
+        print("error: gcov not found", file=sys.stderr)
+        return 2
+
+    root = repo_root()
+    build = args.build_dir
+    if not os.path.isabs(build):
+        build = os.path.join(root, build)
+    if not os.path.isdir(build):
+        print("error: no such build directory: %s" % build, file=sys.stderr)
+        return 2
+
+    gcda = find_gcda(build)
+    if not gcda:
+        print("error: no .gcda files under %s -- configure with "
+              "-DWBR_GPS_COVERAGE=ON and run the tests first" % build,
+              file=sys.stderr)
+        return 2
+
+    workdir = tempfile.mkdtemp(prefix="wbrgps_cov_")
+    try:
+        run_gcov(gcda, workdir)
+        merged = parse_gcov(workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    gated, other = {}, {}
+    for source, lines in merged.items():
+        rel = classify(source, root)
+        if rel is None:
+            continue
+        bucket = gated if rel.startswith("src" + os.sep) else other
+        # The same file can arrive under two spellings (relative and absolute).
+        dest = bucket.setdefault(rel, {})
+        for lineno, covered in lines.items():
+            dest[lineno] = dest.get(lineno, False) or covered
+
+    def report(title, files):
+        if not files:
+            return 0, 0
+        print(title)
+        tot_lines = tot_hit = 0
+        for rel in sorted(files):
+            lines = files[rel]
+            n = len(lines)
+            hit = sum(1 for v in lines.values() if v)
+            tot_lines += n
+            tot_hit += hit
+            pct = (100.0 * hit / n) if n else 100.0
+            print("  %-34s %6.2f%%  (%d/%d)" % (rel, pct, hit, n))
+        return tot_hit, tot_lines
+
+    hit, total = report("src/ (gated):", gated)
+    if args.all:
+        print()
+        report("other (not gated):", other)
+
+    pct = (100.0 * hit / total) if total else 0.0
+    print()
+    print("  %-34s %6.2f%%  (%d/%d)" % ("TOTAL src/", pct, hit, total))
+    print("  %-34s %6.2f%%" % ("target", args.target))
+
+    if pct + 1e-9 < args.target:
+        print("\nBELOW TARGET by %.2f points" % (args.target - pct))
+        return 1
+    print("\nAT OR ABOVE TARGET")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
