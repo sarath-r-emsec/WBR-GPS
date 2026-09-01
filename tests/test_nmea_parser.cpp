@@ -158,6 +158,24 @@ static void test_gp_and_gn_talkers()
     ASSERT_TRUE(s.has_fix);
 }
 
+static void test_non_finite_hdop_and_altitude()
+{
+    // Parser must guard non-finite values that strtod can produce.
+    // Feed hdop and altitude fields with 1e400 (parses as infinity).
+    Snapshot s;
+    const std::string gga_inf_hdop = with_checksum(
+        "$GNGGA,045519.50,1300.16956,N,07740.79521,E,1,04,1e400,921.8,M,-86.3,M,,");
+    ASSERT_TRUE(wbr_gps::nmea_apply(gga_inf_hdop, s, 1000) == ParseResult::UpdatedFix);
+    // Parser must have replaced non-finite hdop with 0.0
+    ASSERT_NEAR(s.hdop, 0.0, 1e-9);
+
+    const std::string gga_inf_alt = with_checksum(
+        "$GNGGA,045519.50,1300.16956,N,07740.79521,E,1,04,1.33,1e400,M,-86.3,M,,");
+    ASSERT_TRUE(wbr_gps::nmea_apply(gga_inf_alt, s, 1000) == ParseResult::UpdatedFix);
+    // Parser must have replaced non-finite alt_m with 0.0
+    ASSERT_NEAR(s.alt_m, 0.0, 1e-9);
+}
+
 static void run_tests()
 {
     test_checksum();
@@ -168,6 +186,7 @@ static void run_tests()
     test_rejects_garbage();
     test_ignores_unused_sentences();
     test_gp_and_gn_talkers();
+    test_non_finite_hdop_and_altitude();
 }
 
 TEST_MAIN

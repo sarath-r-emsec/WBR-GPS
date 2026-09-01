@@ -41,6 +41,8 @@ std::string snapshot_to_json(const Snapshot& s, int64_t now_mono_ms)
 
     // Guard doubles against NaN/Inf which produce invalid JSON.
     const double hdop = std::isfinite(s.hdop) ? s.hdop : 0.0;
+    const double lat = std::isfinite(s.lat) ? s.lat : 0.0;
+    const double lon = std::isfinite(s.lon) ? s.lon : 0.0;
     const double alt_m = std::isfinite(s.alt_m) ? s.alt_m : 0.0;
     const double speed_kph = std::isfinite(s.speed_kph) ? s.speed_kph : 0.0;
 
@@ -59,7 +61,7 @@ std::string snapshot_to_json(const Snapshot& s, int64_t now_mono_ms)
         s.gpsdo_locked   ? "true" : "false",
         s.has_fix        ? "true" : "false",
         s.fix_quality, s.satellites, hdop,
-        s.lat, s.lon, alt_m, speed_kph,
+        lat, lon, alt_m, speed_kph,
         escape(s.time_utc).c_str(),
         (long long)age);
     if (n < 0 || n >= (int)sizeof buf) return "{\"class\":\"ERROR\",\"msg\":\"encode failed\"}";

@@ -202,6 +202,31 @@ static void test_precision_non_round_values()
     ASSERT_NEAR(b.speed_kph, 12.345, 5e-4);
 }
 
+
+static void test_non_finite_position()
+{
+    // lat and lon are not guarded by the parser (which rejects non-finite),
+    // but snapshot_to_json must guard them as a public boundary function.
+    // Construct Snapshot directly with non-finite position to bypass parser.
+    wbr_gps::Snapshot a;
+    a.has_fix = true;
+    a.lat = std::numeric_limits<double>::quiet_NaN();
+    a.lon = std::numeric_limits<double>::infinity();
+
+    const std::string js = wbr_gps::snapshot_to_json(a, 0);
+
+    // Must emit valid JSON (no bare nan/inf).
+    ASSERT_TRUE(js.find("nan") == std::string::npos);
+    ASSERT_TRUE(js.find("inf") == std::string::npos);
+
+    // Must still parse successfully.
+    wbr_gps::Snapshot b;
+    ASSERT_TRUE(wbr_gps::snapshot_from_json(js, b));
+
+    // Non-finite values replaced with 0.0.
+    ASSERT_NEAR(b.lat, 0.0, 1e-9);
+    ASSERT_NEAR(b.lon, 0.0, 1e-9);
+}
 static void run_tests()
 {
     test_round_trip();
@@ -215,6 +240,7 @@ static void run_tests()
     test_non_finite_values();
     test_oversized_truncation();
     test_precision_non_round_values();
+    test_non_finite_position();
 }
 
 TEST_MAIN
