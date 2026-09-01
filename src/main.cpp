@@ -45,6 +45,35 @@ constexpr int64_t kHeartbeatMs   = 2000;
 constexpr int64_t kDefaultStaleMs = 10000;
 constexpr mode_t  kSocketMode    = 0660;
 
+// Hard ceiling on concurrent clients. Two independent reasons, and the
+// tighter of the two is memory, not file descriptors:
+//
+//   * Memory. Each client can hold up to Server::kMaxQueueBytes = 64 KB of
+//     output queue, and the Task 11 systemd unit sets MemoryMax=64M. At
+//     64 KB apiece, 1024 clients is 64 MB of queues alone, so the daemon
+//     would be OOM-killed by its own unit before it ever ran out of file
+//     descriptors. 64 clients caps queue memory at 64 * 64 KB = 4 MB, which
+//     is 6.25% of the unit's ceiling and leaves the rest to the program.
+//   * Spin. Refusing past the cap keeps draining the accept queue, so the
+//     level-triggered listener stops reporting ready. See T8-A.
+//
+// The real client count is about four (the Django badge, the GUI, the
+// monitor, a debug shell), so 64 is generous by an order of magnitude.
+// If you change this, check the MemoryMax arithmetic above; if you change
+// MemoryMax in the unit, check this.
+constexpr size_t  kMaxClients    = 64;
+
+// How long the listener stays deregistered after an accept() failure that
+// retrying cannot clear.
+constexpr int64_t kAcceptBackoffMs = 1000;
+
+// The timerfd is gone, so the epoll timeout is the only thing that wakes an
+// idle loop, and it is what bounds how late the periodic block can run. A
+// poll timeout longer than the period would silently slow presence
+// detection, fix staleness and reconnect.
+static_assert(kPollTimeoutMs <= kPeriodicMs,
+              "the epoll timeout is the idle tick; it must not outrun the periodic period");
+
 volatile sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
@@ -106,6 +135,22 @@ public:
     // leaves with an empty queue and no EPOLLOUT armed.
     void add(int fd)
     {
+        // The cap is enforced here rather than by declining to accept,
+        // because the connection must still come off the accept queue.
+        // Leaving it there would keep the level-triggered listener readable
+        // forever. accept_client() has already inserted this client, so the
+        // count includes it.
+        if (server_.client_count() > kMaxClients) {
+            if (!cap_logged_) {
+                std::fprintf(stderr,
+                             "[wbr-gpsd] at the %zu client cap, refusing further connections\n",
+                             kMaxClients);
+                cap_logged_ = true;   // cleared only when the count drops back
+            }
+            server_.drop_client(fd);          // accepted, then closed at once
+            return;
+        }
+
         // Level triggered, and EPOLLIN only. Level triggered is required, not
         // stylistic: Server::on_client_readable() yields after
         // kMaxReadsPerEvent reads instead of looping to EAGAIN, so with
@@ -127,6 +172,10 @@ public:
         epoll_drop(ep_, fd);        // must precede the close in drop_client()
         server_.drop_client(fd);
         armed_out_.erase(fd);
+        // Re-arm the cap message only once we are genuinely back under it. A
+        // sustained flood therefore logs once: refused peers never enter
+        // clients_, so the count does not move while the flood lasts.
+        if (server_.client_count() < kMaxClients) cap_logged_ = false;
     }
 
     // Write whatever the kernel will take, then make the EPOLLOUT
@@ -164,6 +213,7 @@ private:
     Server&              server_;
     std::map<int, bool>  armed_out_;   // fd -> is EPOLLOUT currently armed
     std::vector<int>     scratch_;
+    bool                 cap_logged_ = false;
 };
 
 // --- command line -----------------------------------------------------------
@@ -178,9 +228,11 @@ struct Options {
     int64_t     stale_ms    = kDefaultStaleMs;
 };
 
-void usage(const char* argv0)
+// --help is a request, so its answer goes to stdout; a usage message
+// provoked by a bad argument is a diagnostic and goes to stderr.
+void usage(std::FILE* out, const char* argv0)
 {
-    std::fprintf(stderr,
+    std::fprintf(out,
         "Usage: %s [--socket PATH] [--serial PATH] [--baud N] [--hid PATH]\n"
         "          [--lock PATH] [--group NAME] [--stale-ms N] [--foreground]\n"
         "\n"
@@ -257,8 +309,8 @@ int main(int argc, char** argv)
 {
     Options opt;
     switch (parse_args(argc, argv, opt)) {
-        case ParseOutcome::Help:  usage(argv[0]); return 0;
-        case ParseOutcome::Error: usage(argv[0]); return 2;
+        case ParseOutcome::Help:  usage(stdout, argv[0]); return 0;
+        case ParseOutcome::Error: usage(stderr, argv[0]); return 2;
         case ParseOutcome::Run:   break;
     }
 
@@ -346,6 +398,15 @@ int main(int argc, char** argv)
 
     int64_t  last_periodic_ms  = 0;
     int64_t  last_heartbeat_ms = 0;
+    // Non-zero while the listener is deregistered after a hard accept
+    // failure: the monotonic time at which to try registering it again.
+    int64_t  listener_resume_ms = 0;
+    // T8-B. Exiting 0 after a fatal loop error would report success to
+    // systemd, which is wrong on its own terms even though the Task 11 unit
+    // uses Restart=always and would bring us back regardless. It also
+    // silently breaks any later switch to Restart=on-failure, and misleads
+    // whoever reads `systemctl status`.
+    int      exit_status       = 0;
     // A plain local. As a function-static it would outlive main's own state
     // and quietly survive into any second call or test harness that reran
     // this loop, comparing a fresh store's seq against the previous run's.
@@ -357,6 +418,7 @@ int main(int argc, char** argv)
         if (n < 0) {
             if (errno == EINTR) continue;        // a signal; g_stop decides
             std::fprintf(stderr, "[wbr-gpsd] epoll_wait: %s\n", std::strerror(errno));
+            exit_status = 1;
             break;                               // never spin on a broken epoll
         }
         const int64_t now = now_mono_ms();
@@ -366,8 +428,26 @@ int main(int argc, char** argv)
             const uint32_t ev = evs[i].events;
 
             if (fd == server.listen_fd()) {
-                for (int c = server.accept_client(); c >= 0; c = server.accept_client()) {
-                    clients.add(c);
+                for (;;) {
+                    const int c = server.accept_client();
+                    if (c >= 0) { clients.add(c); continue; }
+                    if (c == Server::kAcceptDrained) break;
+
+                    // A hard accept failure -- EMFILE, ENFILE, ENOMEM.
+                    // Breaking out is not enough on its own: the pending
+                    // connection stays in the accept queue and the listening
+                    // socket is level triggered, so it would report ready on
+                    // every pass and the loop would spin at 100% of a core
+                    // without ever making progress. Deregister the listener
+                    // and try again shortly; existing clients keep being
+                    // served throughout, and closing one is what frees the
+                    // descriptor that lets accept succeed again.
+                    epoll_drop(ep, server.listen_fd());
+                    listener_resume_ms = now + kAcceptBackoffMs;
+                    std::fprintf(stderr,
+                                 "[wbr-gpsd] pausing accept for %lld ms (%zu clients connected)\n",
+                                 (long long)kAcceptBackoffMs, server.client_count());
+                    break;
                 }
                 continue;
             }
@@ -449,6 +529,19 @@ int main(int argc, char** argv)
             // must stay separately reportable.
             store.set_device_present(leo_bodnar_present());
 
+            // Bring the listener back after a hard accept failure. If the
+            // condition has not cleared, the next accept fails again and
+            // pauses it again -- bounded at one attempt per backoff rather
+            // than one per loop pass.
+            if (listener_resume_ms != 0 && now >= listener_resume_ms) {
+                if (epoll_add(ep, server.listen_fd(), EPOLLIN)) {
+                    listener_resume_ms = 0;
+                    std::fprintf(stderr, "[wbr-gpsd] accepting connections again\n");
+                } else {
+                    listener_resume_ms = now + kAcceptBackoffMs;
+                }
+            }
+
             if (serial.fd() < 0 && serial.should_retry(now)) {
                 std::string path = opt.serial_path;
                 if (path.empty()) {
@@ -456,18 +549,13 @@ int main(int argc, char** argv)
                     if (path.empty()) path = kDefaultSerialPath;
                 }
                 serial.set_path(path);
-                if (serial.open_device() && epoll_add(ep, serial.fd(), EPOLLIN)) {
-                    store.set_serial_ok(true);
-                    serial_fail_logged = false;
-                    std::fprintf(stderr, "[wbr-gpsd] serial open: %s @ %d\n",
-                                 path.c_str(), opt.baud);
-                } else {
-                    // Covers both failures. If the open succeeded but the
-                    // registration did not, closing is mandatory: otherwise
-                    // we would hold the port exclusively with nothing on
-                    // earth ever reading from it.
-                    const int err = errno;
-                    serial.close_device();
+                // The two failures are handled apart so that each reports its
+                // own reason. Sharing one branch meant reading errno after
+                // epoll_add() had already called strerror(), which is allowed
+                // to clobber it -- so a registration failure could be
+                // reported with the wrong cause.
+                if (!serial.open_device()) {
+                    const int err = errno;      // captured before anything else runs
                     store.set_serial_ok(false);
                     serial.note_retry(now);
                     if (!serial_fail_logged) {
@@ -475,6 +563,18 @@ int main(int argc, char** argv)
                                      path.c_str(), std::strerror(err));
                         serial_fail_logged = true;
                     }
+                } else if (!epoll_add(ep, serial.fd(), EPOLLIN)) {
+                    // epoll_add has already logged the reason. Closing is
+                    // mandatory: otherwise we hold the port exclusively with
+                    // nothing on earth ever reading from it.
+                    serial.close_device();
+                    store.set_serial_ok(false);
+                    serial.note_retry(now);
+                } else {
+                    store.set_serial_ok(true);
+                    serial_fail_logged = false;
+                    std::fprintf(stderr, "[wbr-gpsd] serial open: %s @ %d\n",
+                                 path.c_str(), opt.baud);
                 }
             }
 
@@ -484,13 +584,8 @@ int main(int argc, char** argv)
                 // discover() while that is set, so a device that comes back
                 // as a different hidrawN would never be found again.
                 if (opt.hid_path.empty()) hid.set_path("");
-                if (hid.open_device() && epoll_add(ep, hid.fd(), EPOLLIN)) {
-                    store.set_hid_ok(true);
-                    hid_fail_logged = false;
-                    std::fprintf(stderr, "[wbr-gpsd] hid open: %s\n", hid.path().c_str());
-                } else {
-                    const int err = errno;
-                    hid.close_device();
+                if (!hid.open_device()) {
+                    const int err = errno;      // captured before anything else runs
                     store.set_hid_ok(false);
                     store.set_gpsdo_locked(false);
                     hid.note_retry(now);
@@ -499,6 +594,15 @@ int main(int argc, char** argv)
                                      std::strerror(err));
                         hid_fail_logged = true;
                     }
+                } else if (!epoll_add(ep, hid.fd(), EPOLLIN)) {
+                    hid.close_device();
+                    store.set_hid_ok(false);
+                    store.set_gpsdo_locked(false);
+                    hid.note_retry(now);
+                } else {
+                    store.set_hid_ok(true);
+                    hid_fail_logged = false;
+                    std::fprintf(stderr, "[wbr-gpsd] hid open: %s\n", hid.path().c_str());
                 }
             }
 
@@ -530,5 +634,5 @@ int main(int argc, char** argv)
     server.shutdown();          // closes clients and the listener, unlinks the
                                 // socket, releases the singleton lock
     ::close(ep);
-    return 0;
+    return exit_status;
 }

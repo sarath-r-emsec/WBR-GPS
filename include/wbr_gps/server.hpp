@@ -59,6 +59,20 @@ public:
     bool listen_on(const std::string& sock_path, const char* group, mode_t mode);
 
     int  listen_fd() const { return listen_fd_; }
+
+    // accept_client() returns a non-negative fd, or one of the two codes
+    // below. They are NOT interchangeable. kAcceptDrained means the backlog
+    // is empty and the caller should stop looping until the next readiness
+    // event. kAcceptFailed means the accept itself failed -- EMFILE, ENFILE,
+    // ENOMEM -- and is the case a bare -1 used to hide: under fd exhaustion
+    // the pending connection stays in the accept queue AND the listening
+    // socket stays level-triggered readable, so a caller that reads the
+    // failure as "drained" is handed a socket that reports ready forever and
+    // spins at 100% of a core. Callers must stop accepting and back the
+    // listener off; retrying immediately cannot clear the condition. T8-A.
+    static constexpr int kAcceptDrained = -1;
+    static constexpr int kAcceptFailed  = -2;
+
     int  accept_client();
     void drop_client(int fd);
     size_t client_count() const { return clients_.size(); }

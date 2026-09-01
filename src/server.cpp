@@ -179,10 +179,22 @@ bool Server::listen_on(const std::string& sock_path, const char* group, mode_t m
 
 int Server::accept_client()
 {
-    if (listen_fd_ < 0) return -1;
+    if (listen_fd_ < 0) return kAcceptFailed;
     const int fd = ::accept4(listen_fd_, nullptr, nullptr,
                              SOCK_NONBLOCK | SOCK_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        // Three ways of saying "nothing accepted, try again later", none of
+        // which is a fault: an empty backlog, an interrupted call, and a
+        // peer that hung up between connect() and accept().
+        if (errno == EAGAIN || errno == EWOULDBLOCK ||
+            errno == EINTR  || errno == ECONNABORTED) {
+            return kAcceptDrained;
+        }
+        // Everything else is resource exhaustion. Reported, because the
+        // caller must react by pausing the listener rather than looping.
+        std::fprintf(stderr, "[wbr-gpsd] accept: %s\n", std::strerror(errno));
+        return kAcceptFailed;
+    }
 
     Client& c = clients_[fd];
     c = Client{};                            // fd numbers are reused
