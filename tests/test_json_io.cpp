@@ -1,6 +1,8 @@
 #include "wbr_gps/json_io.hpp"
 #include "test_util.h"
 
+#include <limits>
+
 static void test_round_trip()
 {
     wbr_gps::Snapshot a;
@@ -12,11 +14,11 @@ static void test_round_trip()
     a.has_fix        = true;
     a.fix_quality    = 1;
     a.satellites     = 4;
-    a.hdop           = 1.33;
+    a.hdop           = 1.336;  // non-round value to catch precision regressions
     a.lat            = 13.0028260;
     a.lon            = 77.6799202;
-    a.alt_m          = 921.8;
-    a.speed_kph      = 18.52;
+    a.alt_m          = 921.856;  // non-round value to catch precision regressions
+    a.speed_kph      = 18.527;   // non-round value to catch precision regressions
     a.time_utc       = "045519.50";
     a.fix_mono_ms    = 1000;
 
@@ -32,12 +34,15 @@ static void test_round_trip()
     ASSERT_TRUE(b.has_fix);
     ASSERT_EQ(b.fix_quality, 1);
     ASSERT_EQ(b.satellites, 4);
-    ASSERT_NEAR(b.hdop, 1.33, 1e-9);
+    // hdop: %.2f format allows ~±0.005 round-trip tolerance
+    ASSERT_NEAR(b.hdop, 1.336, 5e-3);
     // Position must survive to at least 1e-7 degrees (~1 cm).
     ASSERT_NEAR(b.lat, 13.0028260, 1e-7);
     ASSERT_NEAR(b.lon, 77.6799202, 1e-7);
-    ASSERT_NEAR(b.alt_m, 921.8, 1e-6);
-    ASSERT_NEAR(b.speed_kph, 18.52, 1e-6);
+    // alt_m: %.2f format allows ~±0.005 round-trip tolerance
+    ASSERT_NEAR(b.alt_m, 921.856, 5e-3);
+    // speed_kph: %.3f format allows ~±0.0005 round-trip tolerance
+    ASSERT_NEAR(b.speed_kph, 18.527, 5e-4);
     ASSERT_STREQ(b.time_utc, "045519.50");
     // fix_age_ms is computed at serialization: 1480 - 1000 = 480.
     ASSERT_EQ(b.fix_age_ms, (int64_t)480);
@@ -113,6 +118,65 @@ static void test_scanner_helpers()
     ASSERT_FALSE(wbr_gps::json_get_string(js, "missing", s));
 }
 
+static void test_non_finite_values()
+{
+    // Non-finite doubles should be converted to 0.0 in JSON output.
+    wbr_gps::Snapshot a;
+    a.has_fix = true;
+    a.hdop = std::numeric_limits<double>::quiet_NaN();
+    a.alt_m = std::numeric_limits<double>::infinity();
+    a.speed_kph = -std::numeric_limits<double>::infinity();
+
+    const std::string js = wbr_gps::snapshot_to_json(a, 0);
+
+    // JSON must be parseable (no bare nan/inf which would fail json.loads).
+    wbr_gps::Snapshot b;
+    ASSERT_TRUE(wbr_gps::snapshot_from_json(js, b));
+    // Non-finite values replaced with 0.0
+    ASSERT_NEAR(b.hdop, 0.0, 1e-9);
+    ASSERT_NEAR(b.alt_m, 0.0, 1e-9);
+    ASSERT_NEAR(b.speed_kph, 0.0, 1e-9);
+}
+
+static void test_oversized_truncation()
+{
+    // Buffer overflow on very long time_utc field should produce ERROR class.
+    wbr_gps::Snapshot a;
+    a.has_fix = true;
+    // Create a time_utc that's very long (>700 bytes when formatted).
+    a.time_utc = std::string(750, 'x');
+
+    const std::string js = wbr_gps::snapshot_to_json(a, 0);
+    std::string cls;
+    ASSERT_TRUE(wbr_gps::json_get_string(js, "class", cls));
+    ASSERT_STREQ(cls, "ERROR");
+    // Parser must reject the ERROR class
+    wbr_gps::Snapshot b;
+    ASSERT_FALSE(wbr_gps::snapshot_from_json(js, b));
+}
+
+static void test_precision_non_round_values()
+{
+    // Use non-round values to catch precision regressions.
+    // hdop: %.2f should preserve to ~±0.005
+    // alt_m: %.2f should preserve to ~±0.005
+    // speed_kph: %.3f should preserve to ~±0.0005
+    wbr_gps::Snapshot a;
+    a.has_fix = true;
+    a.hdop = 1.234;
+    a.alt_m = 567.891;
+    a.speed_kph = 12.345;
+
+    const std::string js = wbr_gps::snapshot_to_json(a, 0);
+    wbr_gps::Snapshot b;
+    ASSERT_TRUE(wbr_gps::snapshot_from_json(js, b));
+
+    // Verify precision within expected tolerances.
+    ASSERT_NEAR(b.hdop, 1.234, 5e-3);
+    ASSERT_NEAR(b.alt_m, 567.891, 5e-3);
+    ASSERT_NEAR(b.speed_kph, 12.345, 5e-4);
+}
+
 static void run_tests()
 {
     test_round_trip();
@@ -122,6 +186,9 @@ static void run_tests()
     test_string_escaping();
     test_rejects_malformed();
     test_scanner_helpers();
+    test_non_finite_values();
+    test_oversized_truncation();
+    test_precision_non_round_values();
 }
 
 TEST_MAIN

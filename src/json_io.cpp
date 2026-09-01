@@ -1,5 +1,6 @@
 #include "wbr_gps/json_io.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,6 +38,11 @@ std::string snapshot_to_json(const Snapshot& s, int64_t now_mono_ms)
     // clients distinguish "never" via has_fix/fix_mono_ms, not via magnitude.
     const int64_t age = (s.fix_mono_ms == 0) ? 0 : (now_mono_ms - s.fix_mono_ms);
 
+    // Guard doubles against NaN/Inf which produce invalid JSON.
+    const double hdop = std::isfinite(s.hdop) ? s.hdop : 0.0;
+    const double alt_m = std::isfinite(s.alt_m) ? s.alt_m : 0.0;
+    const double speed_kph = std::isfinite(s.speed_kph) ? s.speed_kph : 0.0;
+
     char buf[768];
     const int n = snprintf(buf, sizeof buf,
         "{\"class\":\"FIX\",\"seq\":%llu,"
@@ -51,12 +57,12 @@ std::string snapshot_to_json(const Snapshot& s, int64_t now_mono_ms)
         s.hid_ok         ? "true" : "false",
         s.gpsdo_locked   ? "true" : "false",
         s.has_fix        ? "true" : "false",
-        s.fix_quality, s.satellites, s.hdop,
-        s.lat, s.lon, s.alt_m, s.speed_kph,
+        s.fix_quality, s.satellites, hdop,
+        s.lat, s.lon, alt_m, speed_kph,
         escape(s.time_utc).c_str(),
         (long long)age);
-    if (n < 0) return "{\"class\":\"ERROR\",\"msg\":\"encode failed\"}";
-    return std::string(buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1));
+    if (n < 0 || n >= (int)sizeof buf) return "{\"class\":\"ERROR\",\"msg\":\"encode failed\"}";
+    return std::string(buf, (size_t)n);
 }
 
 std::string nmea_to_json(const std::string& raw, int64_t t_unix_ms, uint64_t dropped)

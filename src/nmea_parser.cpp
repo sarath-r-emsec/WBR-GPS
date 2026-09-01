@@ -93,7 +93,8 @@ ParseResult nmea_apply(const std::string& line, Snapshot& snap, int64_t now_mono
         snap.fix_quality = std::atoi(f[6].c_str());
         snap.has_fix     = snap.fix_quality > 0;
         snap.satellites  = std::atoi(f[7].c_str());
-        snap.hdop        = std::strtod(f[8].c_str(), nullptr);
+        const double hdop = std::strtod(f[8].c_str(), nullptr);
+        snap.hdop        = std::isfinite(hdop) ? hdop : 0.0;
 
         double lat = 0.0, lon = 0.0;
         if (snap.has_fix && !f[3].empty() && !f[5].empty() &&
@@ -101,7 +102,8 @@ ParseResult nmea_apply(const std::string& line, Snapshot& snap, int64_t now_mono
             nmea_coord(f[4], f[5][0], lon)) {
             snap.lat         = lat;
             snap.lon         = lon;
-            snap.alt_m       = std::strtod(f[9].c_str(), nullptr);
+            const double alt_m = std::strtod(f[9].c_str(), nullptr);
+            snap.alt_m       = std::isfinite(alt_m) ? alt_m : 0.0;
             snap.fix_mono_ms = now_mono_ms;
         }
         // With no fix we keep the last known position but do NOT advance
@@ -112,9 +114,13 @@ ParseResult nmea_apply(const std::string& line, Snapshot& snap, int64_t now_mono
     if (tag == "RMC") {
         // 1=time 2=status 3=lat 4=N/S 5=lon 6=E/W 7=speed(knots) 8=track 9=date
         if (f.size() < 8) return ParseResult::Rejected;
-        snap.speed_kph = (f[2] == "A")
-            ? std::strtod(f[7].c_str(), nullptr) * 1.852
-            : 0.0;
+        if (f[2] == "A") {
+            const double speed_knots = std::strtod(f[7].c_str(), nullptr);
+            const double speed = speed_knots * 1.852;
+            snap.speed_kph = std::isfinite(speed) ? speed : 0.0;
+        } else {
+            snap.speed_kph = 0.0;
+        }
         return ParseResult::UpdatedSpeed;
     }
 
