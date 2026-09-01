@@ -26,6 +26,8 @@ add_library(wbr_gps_core STATIC
   src/json_io.cpp
   src/state_store.cpp
   src/serial_source.cpp
+  src/device_presence.cpp
+  src/hid_source.cpp
 )
 
 enable_testing()
@@ -54,3 +56,8 @@ add_executable(test_serial_source tests/test_serial_source.cpp)
 target_include_directories(test_serial_source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_serial_source PRIVATE wbr_gps_core util)
 add_test(NAME serial_source COMMAND test_serial_source)
+
+add_executable(test_device_presence tests/test_device_presence.cpp)
+target_include_directories(test_device_presence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_device_presence PRIVATE wbr_gps_core)
+add_test(NAME device_presence COMMAND test_device_presence)
