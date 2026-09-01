@@ -57,12 +57,18 @@ bool SerialSource::open_device()
 
     // THE critical call. TIOCEXCL makes further open() attempts fail with
     // EBUSY, so a stray reader gets a loud error instead of silently stealing
-    // bytes out of the shared tty input queue. This is guarantee G1.
+    // bytes out of the shared tty input queue. This is guarantee G1, and it
+    // is not merely real-hardware behaviour: verified directly against a
+    // pty, which supports it too (a prior comment here claiming otherwise
+    // was wrong -- see tests/test_serial_source.cpp for a pinned regression
+    // test that goes red if this ioctl is removed).
     if (::ioctl(fd_, TIOCEXCL) != 0) {
         std::fprintf(stderr, "[wbr-gpsd] TIOCEXCL failed on %s: %s\n",
                      path_.c_str(), std::strerror(errno));
-        // Not fatal on a pty, which does not support it; fatal in spirit on
-        // real hardware, where the caller logs and continues.
+        // Logged, not fatal: we would rather run without the exclusivity
+        // guarantee than refuse to open the device outright. We are not
+        // aware of any real driver that rejects this ioctl; if one ever
+        // does, this is the codepath that keeps the daemon usable anyway.
     }
 
     if (!configure(fd_, baud_)) {
@@ -92,9 +98,12 @@ bool SerialSource::on_readable(StateStore& store, int64_t now_mono_ms,
     // burst can't dribble a few more bytes into buf_ before the run ends.
     // Without this, a garbage run whose length isn't an exact multiple of
     // (kMaxBuf + 1) leaves a residual fragment in buf_ that then prefixes
-    // and corrupts the next legitimate line. Scoped to this call only: a
-    // later on_readable() call is a fresh readable-event, and by then buf_
-    // is already guaranteed empty, so normal accumulation resumes cleanly.
+    // and corrupts the next legitimate line. Cleared by the next '\n' or
+    // '$' (a fresh sentence start is a valid resync point even with no
+    // delimiter before it), and in any case resets at the top of every
+    // call: a later on_readable() call is a fresh readable-event, and by
+    // then buf_ is already guaranteed empty, so normal accumulation
+    // resumes cleanly even if nothing resynced it explicitly.
     bool resyncing = false;
     for (;;) {
         const ssize_t n = ::read(fd_, io, sizeof io);
@@ -111,11 +120,19 @@ bool SerialSource::on_readable(StateStore& store, int64_t now_mono_ms,
                     }
                     continue;
                 }
-                if (resyncing) continue;
+                if (resyncing) {
+                    // '$' always starts a fresh NMEA sentence, so it is a
+                    // valid resync point too, not just '\n': a well-framed
+                    // sentence butted directly against a torn run with no
+                    // delimiter between them is still recoverable.
+                    if (c != '$') continue;
+                    resyncing = false;
+                }
                 buf_ += c;
                 // A line this long is a torn or concatenated read. Drop it
                 // rather than letting the buffer grow without bound, and
-                // stop accumulating for the rest of this burst.
+                // stop accumulating for the rest of this burst until a
+                // delimiter or a fresh '$' resyncs us.
                 if (buf_.size() > kMaxBuf) {
                     buf_.clear();
                     resyncing = true;
