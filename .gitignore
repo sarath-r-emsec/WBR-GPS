@@ -1,7 +1,8 @@
+build*/
 build/
 build-cov/
-*.o
 *.gcda
 *.gcno
 *.info
+*.o
 __pycache__/
