@@ -231,14 +231,14 @@ bool Server::drop_oldest(Client& c)
 
 size_t Server::enqueue(Client& c, const std::string& line)
 {
-    // T7-A. Every message boundary in this queue is located with find('\n'):
-    // first_editable(), drop_oldest() and the in-place FIX replace all depend
-    // on it. A line carrying an embedded newline would make drop_oldest()
-    // erase half a message and splice the wire -- the exact corruption this
-    // class exists to prevent. json_io's escape() strips control bytes today,
-    // so nothing can reach here with one, but that is another file's
-    // invariant. This boundary holds on its own.
-    if (line.find('\n') != std::string::npos) {
+    // T7-A. A line carrying an embedded newline would give drop_oldest() a
+    // false message boundary, making it erase half a message and splice the
+    // wire -- the exact corruption this class exists to prevent. json_io's
+    // escape() strips control bytes today, so nothing reaches here with one,
+    // but that is another file's invariant and this one holds on its own.
+    // enqueue() is one of two content writers into out; the other is the
+    // coalesce in broadcast_fix_line(), which checks separately (T7-E).
+    if (!is_single_line(line)) {
         ++c.dropped;
         return std::string::npos;
     }
@@ -266,7 +266,25 @@ size_t Server::enqueue(Client& c, const std::string& line)
 
 void Server::broadcast_fix(const StateStore& store, int64_t now_mono_ms)
 {
-    const std::string line = snapshot_to_json(store.current(), now_mono_ms);
+    broadcast_fix_line(snapshot_to_json(store.current(), now_mono_ms));
+}
+
+void Server::broadcast_fix_line(const std::string& line)
+{
+    // T7-E. This function writes into Client::out by two routes: the coalesce
+    // replace below, which bypasses enqueue(), and enqueue() itself. Checking
+    // here covers both at their common source, and costs one scan per
+    // broadcast rather than one per client. A malformed snapshot is a daemon
+    // bug, not client backpressure, so it is refused for everyone and logged
+    // rather than counted against any client's dropped total -- sending some
+    // subscribers a spliced queue would be strictly worse than sending none
+    // of them this second's fix.
+    if (!is_single_line(line)) {
+        std::fprintf(stderr,
+                     "[wbr-gpsd] refusing to broadcast a FIX containing a newline\n");
+        return;
+    }
+
     for (auto& kv : clients_) {
         Client& c = kv.second;
         if (!c.want_fix) continue;
@@ -297,6 +315,12 @@ void Server::broadcast_nmea(const std::string& raw, int64_t t_unix_ms)
         if (!c.want_nmea) continue;
         // NMEA cannot coalesce: every sentence is distinct data. Oldest is
         // dropped by enqueue() and reported via the dropped counter.
+        // No top-of-function guard here, deliberately (T7-E): the emitted
+        // line differs per client because `dropped` does, and it reaches out
+        // by exactly one route -- enqueue() -- which already checks it. The
+        // only thing available to check up here is `raw`, which is the wrong
+        // object: raw legitimately carries control bytes that escape() strips,
+        // and refusing those sentences would discard valid data.
         enqueue(c, nmea_to_json(raw, t_unix_ms, c.dropped));
     }
 }

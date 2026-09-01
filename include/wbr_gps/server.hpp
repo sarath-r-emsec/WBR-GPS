@@ -90,7 +90,14 @@ private:
 
     struct Client {
         std::string in;         // partial request line
-        std::string out;        // pending output bytes
+        // Pending output bytes. INVARIANT: every message in here is exactly
+        // one line, because every boundary is located with find('\n').
+        // There are exactly two places that write content into `out` --
+        // enqueue() and the in-place coalesce in broadcast_fix_line() -- and
+        // BOTH must reject a line containing a newline before writing it.
+        // Guarding only one relocates the dependency instead of removing it.
+        // See is_single_line(). T7-A, T7-E.
+        std::string out;
         bool        want_fix  = false;
         bool        want_nmea = false;
         // True when out[0] sits in the middle of a line whose leading bytes
@@ -104,6 +111,20 @@ private:
         size_t      fix_at  = std::string::npos;
         uint64_t    dropped = 0;
     };
+
+    // The queued-message invariant, with one definition rather than a magic
+    // find('\n') copied to each writer. See Client::out.
+    static bool is_single_line(const std::string& line)
+    {
+        return line.find('\n') == std::string::npos;
+    }
+
+    // broadcast_fix() with the snapshot line already rendered. Separated so
+    // the coalesce branch can be driven directly by the test suite: the guard
+    // protecting it is otherwise unreachable, because snapshot_to_json()
+    // cannot emit a newline today -- which is exactly why it must be tested
+    // rather than assumed.
+    void broadcast_fix_line(const std::string& line);
 
     // Offset of the first byte of `out` that has never been handed to the
     // kernel, i.e. the first byte it is safe to edit. npos when the whole

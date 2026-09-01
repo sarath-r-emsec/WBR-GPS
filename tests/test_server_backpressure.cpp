@@ -22,6 +22,10 @@ struct ServerTestAccess {
     {
         return s.clients_.at(fd).dropped;
     }
+    static void broadcast_fix_line(wbr_gps::Server& s, const std::string& line)
+    {
+        s.broadcast_fix_line(line);
+    }
 };
 } // namespace wbr_gps
 using wbr_gps::ServerTestAccess;
@@ -429,6 +433,62 @@ static void test_oversized_message_is_refused_not_queued()
     srv.shutdown();
 }
 
+static void test_coalesce_path_refuses_unframeable_line()
+{
+    // T7-E. broadcast_fix() reaches Client::out by two routes: enqueue(), and
+    // the in-place coalesce replace, which bypasses enqueue() and therefore
+    // bypassed the T7-A guard. Guarding one writer of two relocates the
+    // cross-file dependency rather than removing it. This test drives the
+    // replace branch specifically and proves the guard now covers it.
+    const std::string path = tmp_sock();
+    wbr_gps::Server srv;
+    ASSERT_TRUE(srv.listen_on(path, nullptr, 0600));
+    wbr_gps::StateStore st;
+
+    const int c = connect_client(path);
+    const int s = srv.accept_client();
+    set_nonblock_fd(c);
+    // Never flush: everything stays queued and entirely unsent, which is the
+    // precondition the coalesce branch requires.
+    send_line(c, "{\"op\":\"watch\",\"fix\":true,\"nmea\":false}");
+    ASSERT_TRUE(srv.on_client_readable(s, st, 1000));
+
+    // out is now HELLO + the immediate snapshot, with fix_at on the snapshot.
+    const size_t queued = srv.pending_bytes(s);
+    ASSERT_TRUE(queued > 0);
+
+    // A clean broadcast must take the replace branch, not append: the queue
+    // stays the same size rather than growing by another line. This is what
+    // establishes that the branch under test is the one being exercised.
+    srv.broadcast_fix(st, 1000);
+    ASSERT_EQ(srv.pending_bytes(s), queued);
+
+    // Now the poisoned line, on that same replace branch.
+    ServerTestAccess::broadcast_fix_line(
+        srv, "{\"class\":\"FIX\",\"evil\":\"a\nb\",\"has_fix\":false}");
+    ASSERT_EQ(srv.pending_bytes(s), queued);      // queue untouched
+
+    // And the wire is still exactly two whole, well-formed messages.
+    ASSERT_TRUE(srv.flush_client(s));
+    std::string got;
+    while (drain_available(c, got, 65536) > 0) { }
+    std::string rest;
+    const std::vector<std::string> lines = split_lines(got, rest);
+    ASSERT_EQ(lines.size(), (size_t)2);
+    ASSERT_EQ(rest.size(), (size_t)0);
+    size_t bad = 0;
+    for (const std::string& line : lines) {
+        std::string cls;
+        if (!wbr_gps::json_get_string(line, "class", cls)) ++bad;
+        if (line.find("{\"class\":", 1) != std::string::npos) ++bad;
+        if (line.find("evil") != std::string::npos) ++bad;
+    }
+    ASSERT_EQ(bad, (size_t)0);
+
+    ::close(c);
+    srv.shutdown();
+}
+
 static void run_tests()
 {
     test_slow_client_coalesces_and_does_not_grow();
@@ -441,6 +501,7 @@ static void run_tests()
     test_oversized_message_is_refused_not_queued();
     test_embedded_newline_is_refused();
     test_control_bytes_from_the_device_cannot_break_framing();
+    test_coalesce_path_refuses_unframeable_line();
     cleanup_tmp_dirs();
 }
 
