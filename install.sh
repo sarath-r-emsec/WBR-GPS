@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Install wbr-gpsd, its udev rules and its systemd unit. Requires root.
 #
-# Safe to re-run: every install step below is either naturally idempotent
-# (install(1) overwrites, udevadm reload/trigger are stateless, `systemctl
-# enable` on an already-enabled unit is a no-op) or explicitly guarded (the
-# 99-leobodnar.rules supersession only fires if that file still exists).
-# The one thing a naive re-run would get wrong -- deploying a rebuilt binary
-# to a daemon that is already running the old one in memory -- is handled
-# below by an explicit `restart`, not just `enable --now`.
+# Re-running this script will not corrupt or duplicate anything on disk --
+# install(1) overwrites, udevadm reload/trigger are stateless, `systemctl
+# enable` on an already-enabled unit is a no-op, and the 99-leobodnar.rules
+# supersession is guarded so it only fires once. But a rerun is NOT free
+# operationally: the final step below is an unconditional `systemctl
+# restart`, which BOUNCES A HEALTHY DAEMON AND DROPS EVERY CONNECTED CLIENT
+# even on a no-op reinstall where nothing on disk actually changed. That is
+# deliberate -- it is the only way to guarantee a rebuilt binary actually
+# gets deployed instead of an old one silently staying resident in memory
+# (see the comment above `restart` below) -- but it means you should not
+# re-run this casually against a daemon with live clients attached.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +32,17 @@ cat <<'EOF' >&2
  regression, but it is a visible behaviour change starting the moment this
  script enables the service. Confirm those programs are expected to fail,
  or that this is an acceptable maintenance window, before continuing.
+
+ SEPARATELY: this script also retightens /dev/hidraw* for vendor 1dd2 from
+ mode 0666 (the current, permissive 99-leobodnar.rules) to 0660 group
+ dialout. That change lands the moment `udevadm trigger` runs below --
+ BEFORE the daemon or its unit are even installed, and regardless of
+ whether the daemon ever starts successfully. Unlike the tty, nothing here
+ replaces the old access model on hidraw: the daemon reads it but does not
+ become its sole owner, so if wbr-gpsd never starts, you are left with a
+ tighter permission and no compensating owner. Any non-dialout-group
+ program reading hidraw loses access as soon as this script runs, whether
+ or not the rest of the install succeeds.
 ================================================================================
 EOF
 
@@ -40,10 +55,13 @@ fi
 # A binary that predates its own sources is a silent-wrong-answer risk: the
 # installer would happily deploy code that does not match what is on disk.
 # `find -newer` is a coarse mtime check, not a hash, but it is enough to
-# catch "I edited a .cpp and forgot to rebuild."
+# catch "I edited a .cpp and forgot to rebuild." -newer/-print/-quit (not a
+# pipe to `head`) so a closed downstream pipe can never raise SIGPIPE under
+# `set -o pipefail`; and no `2>/dev/null` -- if find itself cannot run, that
+# is a reason to stop and say so, not silently report "nothing stale".
 stale_src="$(find "$HERE/src" "$HERE/include" "$HERE/CMakeLists.txt" -type f \
   \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-  -newer "$BINARY" 2>/dev/null | head -n1)"
+  -newer "$BINARY" -print -quit)"
 if [[ -n "$stale_src" ]]; then
   echo "build/wbr-gpsd is OLDER than $stale_src -- rebuild before installing:" >&2
   echo "  cmake --build '$HERE/build'" >&2
@@ -51,7 +69,10 @@ if [[ -n "$stale_src" ]]; then
 fi
 
 echo "==> pre-flight: validating the udev rules file"
-udevadm verify "$HERE/udev/99-wbr-gps.rules"
+udevadm verify "$HERE/udev/99-wbr-gps.rules" || {
+  echo "udevadm verify failed -- not touching /etc at all." >&2
+  exit 1
+}
 
 echo "==> installing binary"
 install -m 0755 "$BINARY" /usr/local/bin/wbr-gpsd
@@ -85,11 +106,27 @@ systemctl enable wbr-gpsd.service
 systemctl restart wbr-gpsd.service
 
 echo "==> automated smoke checks"
-sleep 2
-if ! systemctl is-active --quiet wbr-gpsd.service; then
-  echo "wbr-gpsd.service is not active after restart -- installation left the" >&2
-  echo "system CONFIGURED (unit installed, udev rules active, enabled) but the" >&2
-  echo "daemon itself is not running. Check: journalctl -u wbr-gpsd -n 50" >&2
+# Poll rather than a flat sleep: a fixed `sleep 2` reports a false failure
+# for a daemon that is merely slow to come up (e.g. it hit the startup race
+# documented in the unit's After=systemd-udev-settle.service comment and is
+# retrying with backoff). Bounded at 10s -- comfortably past a couple of
+# RestartSec=2 cycles -- so a genuinely dead unit still fails promptly.
+active=0
+for _ in $(seq 1 10); do
+  if systemctl is-active --quiet wbr-gpsd.service; then
+    active=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$active" -ne 1 ]]; then
+  echo "wbr-gpsd.service is not active 10s after restart -- installation left" >&2
+  echo "the system CONFIGURED (unit installed, udev rules active, enabled) but" >&2
+  echo "the daemon itself is not running. Check: journalctl -u wbr-gpsd -n 50" >&2
+  echo "Note: /dev/hidraw* for vendor 1dd2 is ALREADY retightened to 0660" >&2
+  echo "group dialout (was 0666 under the old 99-leobodnar.rules) -- that took" >&2
+  echo "effect regardless of this failure, and nothing has taken over hidraw" >&2
+  echo "access to compensate." >&2
   exit 1
 fi
 echo "    wbr-gpsd.service is active"
