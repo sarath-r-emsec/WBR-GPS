@@ -91,20 +91,26 @@ ParseResult nmea_apply(const std::string& line, Snapshot& snap, int64_t now_mono
 
         snap.time_utc    = f[1];
         snap.fix_quality = std::atoi(f[6].c_str());
-        snap.has_fix     = snap.fix_quality > 0;
         snap.satellites  = std::atoi(f[7].c_str());
         const double hdop = std::strtod(f[8].c_str(), nullptr);
         snap.hdop        = std::isfinite(hdop) ? hdop : 0.0;
 
         double lat = 0.0, lon = 0.0;
-        if (snap.has_fix && !f[3].empty() && !f[5].empty() &&
+        // has_fix means "we hold a trustworthy position": set true only when
+        // fix_quality claims a fix AND both coordinates decode successfully.
+        // A quality field claiming a fix while coordinates are garbage is
+        // contradictory data; trusting the claim over the data is the bug.
+        if (snap.fix_quality > 0 && !f[3].empty() && !f[5].empty() &&
             nmea_coord(f[2], f[3][0], lat) &&
             nmea_coord(f[4], f[5][0], lon)) {
+            snap.has_fix     = true;
             snap.lat         = lat;
             snap.lon         = lon;
             const double alt_m = std::strtod(f[9].c_str(), nullptr);
             snap.alt_m       = std::isfinite(alt_m) ? alt_m : 0.0;
             snap.fix_mono_ms = now_mono_ms;
+        } else {
+            snap.has_fix = false;
         }
         // With no fix we keep the last known position but do NOT advance
         // fix_mono_ms, so age reporting correctly shows the data as stale.

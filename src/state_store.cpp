@@ -46,7 +46,6 @@ void StateStore::set_gpsdo_locked(bool v)
 void StateStore::mark_fix_stale_if_older_than(int64_t now_mono_ms, int64_t max_age_ms)
 {
     if (!snap_.has_fix) return;                 // already stale: idempotent
-    if (snap_.fix_mono_ms == 0) return;         // never had a fix
     if (now_mono_ms - snap_.fix_mono_ms <= max_age_ms) return;
     snap_.has_fix = false;
     bump();

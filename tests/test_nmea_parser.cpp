@@ -176,6 +176,21 @@ static void test_non_finite_hdop_and_altitude()
     ASSERT_NEAR(s.alt_m, 0.0, 1e-9);
 }
 
+static void test_gga_claims_fix_but_bad_coordinates()
+{
+    // Regression test for T4-A: fix_quality=1 claims a fix, but minutes >= 60
+    // is impossible. has_fix must be false because coordinates are malformed,
+    // not trusted based on a quality field alone.
+    Snapshot s;
+    const std::string bad_coord_gga = with_checksum(
+        "$GNGGA,045519.50,1360.00000,N,07740.79521,E,1,04,1.33,921.8,M,-86.3,M,,");
+    ASSERT_TRUE(wbr_gps::nmea_apply(bad_coord_gga, s, 1000) == ParseResult::UpdatedFix);
+    // Quality field claims a fix, but coordinate decode failed.
+    ASSERT_EQ(s.fix_quality, 1);
+    // has_fix must be false: we do not hold a trustworthy position.
+    ASSERT_FALSE(s.has_fix);
+}
+
 static void run_tests()
 {
     test_checksum();
@@ -187,6 +202,7 @@ static void run_tests()
     test_ignores_unused_sentences();
     test_gp_and_gn_talkers();
     test_non_finite_hdop_and_altitude();
+    test_gga_claims_fix_but_bad_coordinates();
 }
 
 TEST_MAIN
