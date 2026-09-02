@@ -163,8 +163,13 @@ cat <<'EOF'
   # 5. It answers (expect a HELLO line, then a FIX line).
   printf '{"op":"get"}\n' | socat - UNIX-CONNECT:/run/wbr-gps/gpsd.sock
 
-  # 6. Restart-on-crash (optional but recommended before trusting G5):
-  sudo kill -9 "$(systemctl show -p MainPID --value wbr-gpsd)"
+  # 6. Restart-on-crash: proves crash supervision and that G1 (single owner)
+  #    is re-established, NOT G5 (that is S12: kill the daemon, confirm
+  #    ZERO openers and clients reporting unavailable -- the opposite of
+  #    this step, which forces a restart). Guarded on is-active: MainPID is
+  #    "0" when the unit is not running, and `kill -9 0` sends SIGKILL to
+  #    this shell's entire process group -- do not paste the unguarded form.
+  systemctl is-active --quiet wbr-gpsd && sudo kill -9 "$(systemctl show -p MainPID --value wbr-gpsd)"
   sleep 4 && systemctl is-active wbr-gpsd && lsof "$(readlink -f /dev/gpsdo)"
 
 Reminder: any program still opening the GPSDO directly (not yet migrated to

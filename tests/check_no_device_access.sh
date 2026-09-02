@@ -33,6 +33,14 @@ root = sys.argv[1]
 
 # The files a consumer links against or imports. Anything else in the tree may
 # touch the device; these three may not.
+#
+# BOUNDARY: this gate reads exactly these three files, not anything they
+# #include transitively. gps_types.hpp is fine to bring in (pure data, no
+# device code) but if client.hpp/client.cpp ever gained a #include of a
+# header that itself opened a device, this gate would not see it -- it
+# would need to be taught to follow #include, or that header would need
+# adding to FILES directly. Worth remembering before trusting a green run
+# here as proof the whole transitive closure is clean.
 FILES = [
     "include/wbr_gps/client.hpp",
     "src/client.cpp",
@@ -92,7 +100,14 @@ def blank_cpp_comments(text):
             out.append(c)
             if c == "\\" and i + 1 < n:
                 out.append(text[i + 1]); i += 2; continue
-            if c == quote:
+            # T12-C: reset on an unescaped newline too, not just the
+            # matching quote. Repro: a C++14 digit separator ('115\'200')
+            # opens "str" state at the apostrophe and, without this, never
+            # closes it within the line -- it then swallows every later //
+            # and /* as literal text instead of a comment marker for the
+            # rest of the file, so a comment's PROSE past that point stops
+            # being blanked and can trip a pattern match on correct code.
+            if c == quote or c == "\n":
                 state = "code"
             i += 1; continue
         if state == "line":

@@ -106,7 +106,15 @@ def main():
 
     failed = False
 
-    # --- assertion: GUI badge is stable, no flapping ------------------------
+    # --- assertion: GUI badge is stable, no flapping, AND healthy -----------
+    #
+    # "Stable" alone is not the property that matters: 30 consecutive
+    # 'GPS Service Down' readings are perfectly stable and mean the daemon
+    # is unreachable. wbr_gps_client.badge_status() has exactly two healthy
+    # states -- 'Locked' and 'Not Locked' -- and this script already waits
+    # for serial_ok=true on the daemon before starting any consumer, so a
+    # healthy run has no excuse for landing on either unhealthy state.
+    UNHEALTHY_BADGES = {"GPS Service Down", "Not Connected"}
     gui = read_gui(args.gui)
     if not gui:
         print("FAIL: no GUI polls captured at all", file=sys.stderr)
@@ -114,16 +122,30 @@ def main():
     else:
         badges = [r.get("badge") for r in gui if "badge" in r]
         distinct = sorted(set(badges))
-        if len(distinct) == 1:
-            print(f"PASS: badge stable across {len(badges)} polls "
-                  f"('{distinct[0]}')")
-        else:
+        if len(distinct) != 1:
             print(f"FAIL: badge flapped across {len(badges)} polls: {distinct}",
                   file=sys.stderr)
             failed = True
+        elif distinct[0] in UNHEALTHY_BADGES:
+            print(f"FAIL: badge stable but UNHEALTHY across {len(badges)} "
+                  f"polls: '{distinct[0]}' -- a healthy daemon this script "
+                  f"already confirmed serial_ok=true on has no excuse for this",
+                  file=sys.stderr)
+            failed = True
+        else:
+            print(f"PASS: badge stable across {len(badges)} polls "
+                  f"('{distinct[0]}')")
+        # service_ok=false is not advisory: this script waited for the
+        # daemon's own serial_ok=true before starting any consumer, so the
+        # GUI seeing the daemon as unreachable during the run is a real
+        # failure of the thing under test (consistent behavior across
+        # consumers), not a note to read past.
         if any(not r.get("service_ok") for r in gui):
             n_down = sum(1 for r in gui if not r.get("service_ok"))
-            print(f"NOTE: {n_down}/{len(gui)} GUI polls saw service_ok=false")
+            print(f"FAIL: {n_down}/{len(gui)} GUI polls saw service_ok=false "
+                  f"-- the daemon was confirmed healthy before this consumer "
+                  f"started", file=sys.stderr)
+            failed = True
 
     # --- assertion: every consumer agrees on position -----------------------
     sources = {
@@ -133,12 +155,24 @@ def main():
     }
     fixed = {name: rec for name, rec in sources.items() if rec is not None}
 
-    if len(fixed) < 2:
+    # ALL sources must report a fix, not merely "enough to compare". The
+    # daemon's own serial_ok=true was already confirmed before any consumer
+    # started, so every consumer silently missing a fix is itself a real
+    # failure of the property under test, not something to average away --
+    # a run where the GUI consumer never got a fix must not be able to
+    # print ALL CHECKS PASSED just because two other consumers did.
+    if len(fixed) < len(sources):
         missing = [name for name, rec in sources.items() if rec is None]
-        print(f"FAIL: fewer than 2 consumers reported a fix (no fix from: "
-              f"{missing}) -- cannot assert position consistency", file=sys.stderr)
+        print(f"FAIL: not every consumer reported a fix (no fix from: "
+              f"{missing}) -- a healthy run confirmed serial_ok=true before "
+              f"any consumer started, so this is a real failure",
+              file=sys.stderr)
         failed = True
-    else:
+    if len(fixed) < 2:
+        print("FAIL: fewer than 2 consumers reported a fix -- cannot assert "
+              "position consistency at all", file=sys.stderr)
+        failed = True
+    elif len(fixed) >= 2:
         names = list(fixed)
         worst_lat = worst_lon = 0.0
         worst_pair = None
@@ -162,10 +196,9 @@ def main():
             for n, r in fixed.items():
                 print(f"       {n}: lat={r['lat']:.7f} lon={r['lon']:.7f}", file=sys.stderr)
             failed = True
-        if len(fixed) < len(sources):
-            missing = [name for name, rec in sources.items() if rec is None]
-            print(f"NOTE: no fix observed from: {missing} (compared the "
-                  f"{len(fixed)} that did report one)")
+        # (missing-fix consumers are already reported as FAIL above, not
+        # repeated here as a NOTE -- a consumer with no fix is a failure,
+        # not a footnote.)
 
     return 1 if failed else 0
 

@@ -120,11 +120,12 @@ PHASE2_PID=""
 GUI_PID=""
 PROBE_LOOP_PID=""
 PHASE2_POLL_PID=""
+LSOF_POLL_PID=""
 
 cleanup() {
     # 50 deciseconds = 5s bound: comfortably past phase2_server's observed
     # slow-SIGTERM behaviour before this escalates to SIGKILL.
-    kill_wait_all 50 "$PROBE_LOOP_PID" "$PHASE2_POLL_PID" "$GUI_PID" "$CAP_PID" "$PHASE2_PID"
+    kill_wait_all 50 "$PROBE_LOOP_PID" "$PHASE2_POLL_PID" "$GUI_PID" "$CAP_PID" "$PHASE2_PID" "$LSOF_POLL_PID"
     # Only kill a daemon THIS script started (SELF-HOSTED mode). A PROD-mode
     # daemon is systemd's to manage; this script must never bounce it.
     [[ -n "$DAEMON_PID" ]] && kill_wait_all 50 "$DAEMON_PID"
@@ -198,6 +199,24 @@ else
     fi
     note "self-hosted wbr-gpsd up, pid=$DAEMON_PID, socket=$SOCK, serial_ok=true"
 fi
+
+# --- continuous lsof sampling for the whole run ----------------------------
+#
+# A single post-run lsof check (the original design) only sees whoever
+# still holds the device AFTER step 4 has already killed three of the four
+# consumers -- a consumer that held the device for the whole run and then
+# exited cleanly leaves no trace in a one-shot check. Sampling throughout
+# and requiring every sample to agree is the only way this assertion
+# actually covers the run, not just its last instant.
+: >"$TMPDIR/lsof_samples.log"
+( while true; do
+      OUT="$(lsof -F pc "$DEV" 2>/dev/null || true)"
+      N="$(grep -c '^p' <<<"$OUT" || true)"
+      NAMES="$(grep '^c' <<<"$OUT" | cut -c2- | sort -u | paste -sd, -)"
+      echo "openers=$N names=${NAMES:-none}" >>"$TMPDIR/lsof_samples.log"
+      sleep 2
+  done ) &
+LSOF_POLL_PID=$!
 
 echo "=== 2. start every real consumer against $SOCK ==="
 
@@ -298,50 +317,66 @@ echo "=== 3. let all four consumers run concurrently for ${RUN_SECONDS}s ==="
 sleep "$RUN_SECONDS"
 
 echo "=== 4. stop the consumers (daemon and phase2_server stay up until exit) ==="
-# 30 deciseconds = 3s: these four are our own light background loops (a
+# 30 deciseconds = 3s: these five are our own light background loops (a
 # bash while-loop and gps_capture/the Python poller, both of which install
 # ordinary SIGINT/SIGTERM handlers), so they are expected to die quickly.
-kill_wait_all 30 "$PROBE_LOOP_PID" "$PHASE2_POLL_PID" "$GUI_PID" "$CAP_PID"
-CAP_PID=""; GUI_PID=""; PROBE_LOOP_PID=""; PHASE2_POLL_PID=""
+kill_wait_all 30 "$PROBE_LOOP_PID" "$PHASE2_POLL_PID" "$GUI_PID" "$CAP_PID" "$LSOF_POLL_PID"
+CAP_PID=""; GUI_PID=""; PROBE_LOOP_PID=""; PHASE2_POLL_PID=""; LSOF_POLL_PID=""
 
-echo "=== 5. exactly one opener of $DEV, and it is wbr-gpsd ==="
-LSOF_OUT="$(lsof -F pc "$DEV" 2>/dev/null || true)"
-N_OPENERS="$(grep -c '^p' <<<"$LSOF_OUT" || true)"
-OWNER="$(grep '^c' <<<"$LSOF_OUT" | head -1 | cut -c2-)"
-if [[ "$N_OPENERS" -eq 1 ]]; then
-    pass "exactly one opener of $DEV"
+echo "=== 5. every lsof sample across the whole run showed at most one opener, and it was always wbr-gpsd ==="
+# A one-shot check here would only see whoever holds the device AFTER the
+# kill above -- three of the four consumers are already dead by this line.
+# The real evidence is the sample log collected throughout step 3 (started
+# right before step 2, so it also covers consumer startup).
+if [[ ! -s "$TMPDIR/lsof_samples.log" ]]; then
+    fail "no lsof samples were collected during the run"
 else
-    fail "expected 1 opener of $DEV, found $N_OPENERS"
-    echo "$LSOF_OUT" >&2
-fi
-if [[ "$OWNER" == "wbr-gpsd" ]]; then
-    pass "the opener is wbr-gpsd"
-else
-    fail "the opener is '$OWNER', not wbr-gpsd"
+    N_SAMPLES="$(wc -l <"$TMPDIR/lsof_samples.log")"
+    MAX_OPENERS="$(sed -n 's/^openers=\([0-9]*\).*/\1/p' "$TMPDIR/lsof_samples.log" | sort -n | tail -1)"
+    BAD_LINES="$(grep -vE '^openers=(0 names=none|1 names=wbr-gpsd)$' "$TMPDIR/lsof_samples.log" || true)"
+    if [[ -z "$BAD_LINES" && "$MAX_OPENERS" -eq 1 ]]; then
+        pass "all $N_SAMPLES lsof samples over the run showed at most one opener, and every single-opener sample was wbr-gpsd (max seen: $MAX_OPENERS)"
+    else
+        fail "lsof sampling found a problem across $N_SAMPLES samples (max openers seen: ${MAX_OPENERS:-0})"
+        if [[ -n "$BAD_LINES" ]]; then
+            echo "bad samples:" >&2
+            echo "$BAD_LINES" >&2
+        fi
+    fi
 fi
 
-echo "=== 6. zero torn sentences in captured NMEA ==="
+echo "=== 6. every captured NMEA line is a single, well-formed, checksum-valid sentence ==="
+# A shape-only regex (leading $, five letters, a comma, ANYTHING, a star,
+# two hex digits) passes a two-sentence splice on one line as long as the
+# tail looks like a valid trailer -- exactly the shape of the original
+# bug's corruption -- and it passes a shape-valid-but-checksum-invalid
+# sentence outright, which matters here specifically because the daemon's
+# passthrough deliberately forwards parser-rejected sentences verbatim
+# (see gps_capture.cpp). tests/fixtures/check_nmea_integrity.py checks the
+# real NMEA-0183 checksum and an exactly-one-'$'-per-line splice guard.
 if [[ -s "$TMPDIR/nmea.log" ]]; then
     N_LINES="$(wc -l <"$TMPDIR/nmea.log")"
-    TORN="$(grep -cvE '^\$[A-Z]{5},.*\*[0-9A-Fa-f]{2}$' "$TMPDIR/nmea.log" || true)"
-    if [[ "$TORN" -eq 0 ]]; then
-        pass "no torn sentences ($N_LINES lines captured)"
+    if python3 "$WBR_GPS_DIR/tests/fixtures/check_nmea_integrity.py" "$TMPDIR/nmea.log"; then
+        pass "all captured NMEA lines are single, well-formed, checksum-valid sentences"
     else
-        fail "$TORN of $N_LINES captured lines are torn"
-        grep -nvE '^\$[A-Z]{5},.*\*[0-9A-Fa-f]{2}$' "$TMPDIR/nmea.log" >&2
+        fail "at least one captured NMEA line failed integrity checks (see above)"
     fi
     if [[ "$N_LINES" -lt 10 ]]; then
-        note "only $N_LINES lines captured -- the torn-sentence check has little statistical weight this run"
+        note "only $N_LINES lines captured -- this check has little statistical weight this run"
     fi
 else
     fail "no NMEA captured at all (nmea.log is empty or missing)"
 fi
 
 echo "=== 7. no SerialException / multiple-access anywhere ==="
+# *.err is in this glob because the GUI poller's own errors go to
+# gui_poll.err, not gui_poll.jsonl or any *.log file -- an earlier version
+# of this check globbed only *.log/*.jsonl and so could never see a
+# SerialException from the one consumer that historically produced them.
 if grep -qiE "SerialException|multiple access on port" \
-        "$TMPDIR"/*.log "$TMPDIR"/*.jsonl 2>/dev/null; then
+        "$TMPDIR"/*.log "$TMPDIR"/*.jsonl "$TMPDIR"/*.err 2>/dev/null; then
     fail "a consumer hit a serial access error"
-    grep -inE "SerialException|multiple access on port" "$TMPDIR"/*.log "$TMPDIR"/*.jsonl 2>/dev/null >&2
+    grep -inE "SerialException|multiple access on port" "$TMPDIR"/*.log "$TMPDIR"/*.jsonl "$TMPDIR"/*.err 2>/dev/null >&2
 else
     pass "no serial access errors in any consumer's output"
 fi
