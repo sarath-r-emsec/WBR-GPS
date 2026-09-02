@@ -120,3 +120,8 @@ add_test(NAME concurrency_lifecycle COMMAND test_concurrency_lifecycle)
 # Guarantee G5, checked structurally rather than promised in a comment.
 add_test(NAME no_device_access
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_device_access.sh)
+
+# tools/gpsq is a debug tool, but three test/deploy scripts call it
+# positionally, so its argument parsing is load-bearing.
+add_test(NAME gpsq_args
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gpsq_args.py)

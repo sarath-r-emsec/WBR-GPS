@@ -5,8 +5,18 @@ A debugging convenience, not part of the product: stdlib only, no install.
 It exists because socat is not available everywhere we need to poke at the
 socket.
 
+  gpsq                                              # get, default socket
+  gpsq --socket /tmp/x/s.sock
   gpsq /run/wbr-gps/gpsd.sock '{"op":"get"}'
-  gpsq /tmp/wbrgps/gpsd.sock '{"op":"watch","nmea":true}' 5
+  gpsq --socket /tmp/x/s.sock '{"op":"watch","nmea":true}' 5
+
+The socket path may be given either as --socket PATH or as the first
+positional argument. Both spellings exist on purpose: every other binary
+in the project takes --socket PATH, so reaching for that here is the
+natural thing to do, while tests/soak.sh, tests/regression_all_consumers.sh
+and tools/handoff-root.sh all call this positionally and must keep working.
+Giving both is an error rather than a silent precedence rule -- one of the
+two would be ignored, and which one is not guessable from the command line.
 """
 
 import socket
@@ -14,15 +24,95 @@ import sys
 import time
 
 DEFAULT_SECONDS = 1.0
+DEFAULT_SOCKET = '/run/wbr-gps/gpsd.sock'  # wbr_gps::kDefaultSocketPath
+DEFAULT_REQUEST = '{"op":"get"}'
+
+USAGE = (
+    'usage: gpsq [--socket PATH] [SOCKET] [REQUEST_JSON] [SECONDS]\n'
+    '  SOCKET  defaults to %s\n'
+    '  REQUEST defaults to %s\n'
+    '  SECONDS defaults to %s\n' % (DEFAULT_SOCKET, DEFAULT_REQUEST, DEFAULT_SECONDS)
+)
+
+
+def parse_args(argv):
+    """Split argv into (path, request, seconds) or raise ValueError.
+
+    Kept separate from main() so it can be exercised without a live socket.
+    """
+    flag_path = None
+    rest = []
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a in ('-h', '--help'):
+            raise ValueError(None)  # not an error: caller prints usage, exits 0
+        if a == '--socket':
+            if i + 1 >= len(argv):
+                raise ValueError('--socket needs a path')
+            if flag_path is not None:
+                raise ValueError('--socket given more than once')
+            flag_path = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith('--socket='):
+            if flag_path is not None:
+                raise ValueError('--socket given more than once')
+            flag_path = a.split('=', 1)[1]
+            i += 1
+            continue
+        if a.startswith('-') and a != '-':
+            raise ValueError('unknown option: %s' % a)
+        rest.append(a)
+        i += 1
+
+    if len(rest) > 3:
+        raise ValueError('too many arguments')
+
+    if flag_path is not None:
+        # With --socket, positionals shift: the first is the request, not a
+        # path. Accepting both spellings of the path at once would mean
+        # silently ignoring one of them.
+        if len(rest) > 2:
+            raise ValueError('too many arguments after --socket')
+        if rest and not rest[0].lstrip().startswith('{'):
+            # Almost certainly a second spelling of the path rather than a
+            # request. Sending it as one would produce a confusing ERROR
+            # reply from the daemon about malformed JSON.
+            raise ValueError(
+                'path given twice: --socket %s and positional %r; '
+                'use one or the other' % (flag_path, rest[0]))
+        path = flag_path
+        request = rest[0] if len(rest) > 0 else DEFAULT_REQUEST
+        secs = rest[1] if len(rest) > 1 else None
+    else:
+        path = rest[0] if len(rest) > 0 else DEFAULT_SOCKET
+        request = rest[1] if len(rest) > 1 else DEFAULT_REQUEST
+        secs = rest[2] if len(rest) > 2 else None
+
+    if secs is None:
+        seconds = DEFAULT_SECONDS
+    else:
+        try:
+            seconds = float(secs)
+        except ValueError:
+            raise ValueError('SECONDS must be a number, got %r' % secs)
+        if not (seconds > 0):
+            raise ValueError('SECONDS must be positive, got %r' % secs)
+
+    return path, request, seconds
 
 
 def main(argv):
-    if len(argv) < 3:
-        print('usage: gpsq SOCKET REQUEST_JSON [SECONDS]', file=sys.stderr)
+    try:
+        path, request, seconds = parse_args(argv)
+    except ValueError as exc:
+        if exc.args[0] is None:
+            sys.stdout.write(USAGE)
+            return 0
+        print('gpsq: %s' % exc, file=sys.stderr)
+        sys.stderr.write(USAGE)
         return 2
-
-    path, request = argv[1], argv[2]
-    seconds = float(argv[3]) if len(argv) > 3 else DEFAULT_SECONDS
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(seconds)
