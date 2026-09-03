@@ -15,12 +15,35 @@ constexpr int64_t kBackoffMax = 5000;
 constexpr const char* kHidrawClassDir = "/sys/class/hidraw";
 constexpr const char* kHidIdPrefix = "HID_ID=";
 constexpr const char* kLeoVendorSeg = ":00001DD2:";
+// First byte of the LBE-1421 status report; see hid_decode_lock().
+constexpr unsigned char kStatusReportMarker = 0x7f;
 } // namespace
 
 bool hid_decode_lock(const unsigned char* rep, ssize_t n)
 {
     if (n < 2) return false;
-    // Bit 0 clear means locked, matching the existing WBR-SA reader.
+    // Require the status report's leading marker before trusting byte 1.
+    //
+    // The old form was just `return (rep[1] & 0x01) == 0;` -- bit 0 clear
+    // means locked. That reports LOCKED for an ALL-ZERO buffer, and the
+    // caller in on_readable() zero-initialises `rep`, so "no information"
+    // decoded as "locked". A consumer switching an SDR onto the GPSDO's
+    // 10 MHz reference on that answer would be trusting a clock nothing had
+    // confirmed. Absence of evidence must read as unlocked, not locked.
+    //
+    // 0x7f is measured, not guessed: read live from /dev/hidraw2 on the
+    // LBE-1421 on 2026-09-03 while the unit was locked, which sends a
+    // 64-byte report about once a second:
+    //
+    //     7f 00 ff ff ff ff ff ff ...        <- locked   (byte 1 bit 0 clear)
+    //        ^^ lock byte
+    //     ^^ status-report marker
+    //
+    // A report that does not start with the marker is not this status report,
+    // so we decline to read a lock state out of it. If the unit ever uses a
+    // different marker for some other report, that report now yields
+    // "unlocked" rather than a confident wrong "locked" -- the safe direction.
+    if (rep[0] != kStatusReportMarker) return false;
     return (rep[1] & 0x01) == 0;
 }
 

@@ -108,8 +108,19 @@ def badge_status(snap):
         return "GPS Service Down"
     if not snap.get("device_present"):
         return "Not Connected"
-    # The GPSDO lock bit and the NMEA fix are different signals; either one
-    # being good means the disciplined clock is usable.
-    if snap.get("gpsdo_locked") or snap.get("has_fix"):
+    # The GPSDO lock bit and the NMEA fix are DIFFERENT signals and must not
+    # be ORed together, which is what this used to do:
+    #
+    #     if snap.get("gpsdo_locked") or snap.get("has_fix"): return "Locked"
+    #
+    # gpsdo_locked is the 10 MHz oscillator's PLL; has_fix is a satellite
+    # position fix. After the GPSDO is replugged the oscillator relocks in
+    # seconds while the receiver takes ~30s to reacquire satellites, so the OR
+    # reported a flat "Locked" for that whole window with no position at all.
+    # Observed in the field 2026-09-03. "Locked" now means what an operator
+    # reads it to mean: there is a usable fix.
+    if snap.get("has_fix"):
         return "Locked"
+    if snap.get("gpsdo_locked"):
+        return "Clock locked, no fix"
     return "Not Locked"

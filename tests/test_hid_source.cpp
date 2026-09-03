@@ -4,18 +4,38 @@
 #include <cstdint>
 
 // Test the pure bit-decode function
-static void test_hid_decode_lock_bit_clear_is_locked()
+// Byte layout captured live from an LBE-1421 on 2026-09-03, locked:
+//     7f 00 ff ff ff ff ff ff ...   (64 bytes, ~1 per second)
+static void test_hid_decode_lock_real_locked_report()
 {
-    unsigned char rep[8] = { 0 };
-    rep[1] = 0x00;  // bit 0 clear = locked
-    ASSERT_TRUE(wbr_gps::hid_decode_lock(rep, 2));
+    unsigned char rep[8] = { 0x7f, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    ASSERT_TRUE(wbr_gps::hid_decode_lock(rep, 8));
 }
 
 static void test_hid_decode_lock_bit_set_is_unlocked()
 {
+    unsigned char rep[8] = { 0x7f, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
+}
+
+// THE REGRESSION. on_readable() zero-initialises its report buffer, so an
+// all-zero report is exactly what "we learned nothing" looks like. The old
+// decode was `(rep[1] & 0x01) == 0` alone, which called that LOCKED --
+// asserting a disciplined 10 MHz reference that nothing had confirmed.
+// Absence of evidence must read as unlocked.
+static void test_hid_decode_lock_all_zero_report_is_not_locked()
+{
     unsigned char rep[8] = { 0 };
-    rep[1] = 0x01;  // bit 0 set = unlocked
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
     ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 2));
+}
+
+// Any report that is not the status report yields no lock opinion at all,
+// rather than a confident wrong one.
+static void test_hid_decode_lock_wrong_marker_is_not_locked()
+{
+    unsigned char rep[8] = { 0x01, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
 }
 
 static void test_hid_decode_lock_short_read_zero()
@@ -44,8 +64,10 @@ static void test_hid_source_discover()
 
 static void run_tests()
 {
-    test_hid_decode_lock_bit_clear_is_locked();
+    test_hid_decode_lock_real_locked_report();
     test_hid_decode_lock_bit_set_is_unlocked();
+    test_hid_decode_lock_all_zero_report_is_not_locked();
+    test_hid_decode_lock_wrong_marker_is_not_locked();
     test_hid_decode_lock_short_read_zero();
     test_hid_decode_lock_short_read_one();
     test_hid_source_discover();
