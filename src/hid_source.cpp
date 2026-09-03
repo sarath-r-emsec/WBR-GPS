@@ -15,36 +15,51 @@ constexpr int64_t kBackoffMax = 5000;
 constexpr const char* kHidrawClassDir = "/sys/class/hidraw";
 constexpr const char* kHidIdPrefix = "HID_ID=";
 constexpr const char* kLeoVendorSeg = ":00001DD2:";
-// First byte of the LBE-1421 status report; see hid_decode_lock().
-constexpr unsigned char kStatusReportMarker = 0x7f;
 } // namespace
 
 bool hid_decode_lock(const unsigned char* rep, ssize_t n)
 {
-    if (n < 2) return false;
-    // Require the status report's leading marker before trusting byte 1.
+    (void)rep;
+    (void)n;
+    // We cannot determine the GPSDO's lock state from this report, so we do
+    // not claim to. Returning false means "not confirmed locked", which is
+    // the same fail-safe direction main.cpp already takes when the HID handle
+    // is lost: never assert a disciplined 10 MHz reference that nothing has
+    // confirmed.
     //
-    // The old form was just `return (rep[1] & 0x01) == 0;` -- bit 0 clear
-    // means locked. That reports LOCKED for an ALL-ZERO buffer, and the
-    // caller in on_readable() zero-initialises `rep`, so "no information"
-    // decoded as "locked". A consumer switching an SDR onto the GPSDO's
-    // 10 MHz reference on that answer would be trusting a clock nothing had
-    // confirmed. Absence of evidence must read as unlocked, not locked.
+    // Two decodes have now been tried and both were wrong:
     //
-    // 0x7f is measured, not guessed: read live from /dev/hidraw2 on the
-    // LBE-1421 on 2026-09-03 while the unit was locked, which sends a
-    // 64-byte report about once a second:
+    //   (rep[1] & 0x01) == 0        "bit 0 clear means locked". Measured on
+    //                               an LBE-1421 2026-09-03: byte 1 was 0x00
+    //                               in ALL 157 reports over 20s, spanning
+    //                               both a satellite-locked period and a
+    //                               0-satellite period. Bit 0 is never set,
+    //                               so this is a constant `true` -- which is
+    //                               the bug a field replug exposed, where
+    //                               every UI kept saying "Locked" while the
+    //                               unit was visibly still acquiring.
     //
-    //     7f 00 ff ff ff ff ff ff ...        <- locked   (byte 1 bit 0 clear)
-    //        ^^ lock byte
-    //     ^^ status-report marker
+    //   rep[0] == 0x7f              a "status report marker" inferred from
+    //                               six samples that all happened to read
+    //                               0x7f while locked. Byte 0 is not a
+    //                               marker: the same 20s capture shows it
+    //                               alternating 0x6e / 0x76. Requiring it
+    //                               forced a constant `false`.
     //
-    // A report that does not start with the marker is not this status report,
-    // so we decline to read a lock state out of it. If the unit ever uses a
-    // different marker for some other report, that report now yields
-    // "unlocked" rather than a confident wrong "locked" -- the safe direction.
-    if (rep[0] != kStatusReportMarker) return false;
-    return (rep[1] & 0x01) == 0;
+    // What the report does look like, 64 bytes at ~8 Hz:
+    //
+    //     6e 00 ff ff ff ff ...     0 satellites, no fix
+    //     76 00 ff ff ff ff ...     0 satellites, no fix
+    //     7f 00 ff ff ff ff ...     locked with a fix
+    //
+    // Byte 0 MAY track lock -- 0x7f was only ever seen while locked -- but
+    // that is two observations, which is exactly the reasoning that produced
+    // the second wrong decode. Restoring this needs a controlled capture:
+    // record the report stream across a known-locked and known-unlocked
+    // period, confirmed against the front-panel LED, and find the bit that
+    // actually changes. Until then has_fix is the trustworthy signal and is
+    // what every consumer keys "Locked" off.
+    return false;
 }
 
 std::string HidSource::discover()

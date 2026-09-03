@@ -4,52 +4,24 @@
 #include <cstdint>
 
 // Test the pure bit-decode function
-// Byte layout captured live from an LBE-1421 on 2026-09-03, locked:
-//     7f 00 ff ff ff ff ff ff ...   (64 bytes, ~1 per second)
-static void test_hid_decode_lock_real_locked_report()
+// hid_decode_lock() reports "not confirmed locked" for every input, because
+// no byte of this report has been shown to carry the lock state. Byte 1 was
+// 0x00 in all 157 reports of a 20s capture spanning locked and unlocked
+// periods, and byte 0 alternates 0x6e/0x76. These pin that contract so a
+// future decode has to arrive with evidence rather than a guess.
+static void test_hid_decode_lock_never_claims_locked()
 {
-    unsigned char rep[8] = { 0x7f, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    ASSERT_TRUE(wbr_gps::hid_decode_lock(rep, 8));
-}
-
-static void test_hid_decode_lock_bit_set_is_unlocked()
-{
-    unsigned char rep[8] = { 0x7f, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
-}
-
-// THE REGRESSION. on_readable() zero-initialises its report buffer, so an
-// all-zero report is exactly what "we learned nothing" looks like. The old
-// decode was `(rep[1] & 0x01) == 0` alone, which called that LOCKED --
-// asserting a disciplined 10 MHz reference that nothing had confirmed.
-// Absence of evidence must read as unlocked.
-static void test_hid_decode_lock_all_zero_report_is_not_locked()
-{
-    unsigned char rep[8] = { 0 };
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 2));
-}
-
-// Any report that is not the status report yields no lock opinion at all,
-// rather than a confident wrong one.
-static void test_hid_decode_lock_wrong_marker_is_not_locked()
-{
-    unsigned char rep[8] = { 0x01, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 8));
-}
-
-static void test_hid_decode_lock_short_read_zero()
-{
-    unsigned char rep[8] = { 0 };
-    // n=0 should return false; caller should not use the result
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 0));
-}
-
-static void test_hid_decode_lock_short_read_one()
-{
-    unsigned char rep[8] = { 0 };
-    // n=1 should return false; caller should not use the result
-    ASSERT_FALSE(wbr_gps::hid_decode_lock(rep, 1));
+    unsigned char locked_looking[8] = { 0x7f, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    unsigned char unlocked_bit[8]   = { 0x7f, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    unsigned char observed_a[8]     = { 0x6e, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    unsigned char observed_b[8]     = { 0x76, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    unsigned char all_zero[8]       = { 0 };
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(locked_looking, 8));
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(unlocked_bit, 8));
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(observed_a, 8));
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(observed_b, 8));
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(all_zero, 8));
+    ASSERT_FALSE(wbr_gps::hid_decode_lock(all_zero, 0));
 }
 
 // Test fd-level behavior: discover() finds the correct hidraw device
@@ -64,12 +36,7 @@ static void test_hid_source_discover()
 
 static void run_tests()
 {
-    test_hid_decode_lock_real_locked_report();
-    test_hid_decode_lock_bit_set_is_unlocked();
-    test_hid_decode_lock_all_zero_report_is_not_locked();
-    test_hid_decode_lock_wrong_marker_is_not_locked();
-    test_hid_decode_lock_short_read_zero();
-    test_hid_decode_lock_short_read_one();
+    test_hid_decode_lock_never_claims_locked();
     test_hid_source_discover();
 }
 
