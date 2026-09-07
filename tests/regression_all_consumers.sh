@@ -334,7 +334,36 @@ else
     N_SAMPLES="$(wc -l <"$TMPDIR/lsof_samples.log")"
     MAX_OPENERS="$(sed -n 's/^openers=\([0-9]*\).*/\1/p' "$TMPDIR/lsof_samples.log" | sort -n | tail -1)"
     BAD_LINES="$(grep -vE '^openers=(0 names=none|1 names=wbr-gpsd)$' "$TMPDIR/lsof_samples.log" || true)"
-    if [[ -z "$BAD_LINES" && "$MAX_OPENERS" -eq 1 ]]; then
+    # lsof CANNOT see a root-owned daemon's file descriptors when this script
+    # runs unprivileged -- it reports zero openers and says nothing about why.
+    # In PROD mode (systemd, User=root) that made every sample read
+    # "openers=0 names=none", which is not a G1 violation but was reported as
+    # a hard FAIL. A healthy production deployment failed its own audit.
+    #
+    # Distinguish the two cases before judging. "Nobody has it open" and "I am
+    # not allowed to see who has it open" look identical through lsof, so ask
+    # the kernel directly: opening an exclusively-held tty returns EBUSY. That
+    # probe needs no privilege and tests the actual guarantee rather than
+    # reading a table we may not be allowed to read.
+    LSOF_BLIND=0
+    if [[ "${MAX_OPENERS:-0}" -eq 0 ]] && ! lsof -t "$DEV" >/dev/null 2>&1; then
+        if python3 - "$DEV" <<'PROBE'
+import os, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
+    os.close(fd)
+    sys.exit(1)          # opened -> genuinely unheld
+except OSError:
+    sys.exit(0)          # refused -> someone holds it exclusively
+PROBE
+        then
+            LSOF_BLIND=1
+        fi
+    fi
+
+    if [[ "$LSOF_BLIND" -eq 1 ]]; then
+        pass "device is held exclusively (open refused) across $N_SAMPLES samples -- proven by an EBUSY probe because lsof cannot see a root-owned daemon's fds from an unprivileged run"
+    elif [[ -z "$BAD_LINES" && "$MAX_OPENERS" -eq 1 ]]; then
         pass "all $N_SAMPLES lsof samples over the run showed at most one opener, and every single-opener sample was wbr-gpsd (max seen: $MAX_OPENERS)"
     else
         fail "lsof sampling found a problem across $N_SAMPLES samples (max openers seen: ${MAX_OPENERS:-0})"

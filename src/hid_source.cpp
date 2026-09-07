@@ -15,51 +15,60 @@ constexpr int64_t kBackoffMax = 5000;
 constexpr const char* kHidrawClassDir = "/sys/class/hidraw";
 constexpr const char* kHidIdPrefix = "HID_ID=";
 constexpr const char* kLeoVendorSeg = ":00001DD2:";
+// Byte 0 of the LBE-1421 status report while the unit is locked.
+// LED-confirmed; see hid_decode_lock() for the full evidence.
+constexpr unsigned char kLockedStatus = 0x7f;
 } // namespace
 
 bool hid_decode_lock(const unsigned char* rep, ssize_t n)
 {
-    (void)rep;
-    (void)n;
-    // We cannot determine the GPSDO's lock state from this report, so we do
-    // not claim to. Returning false means "not confirmed locked", which is
-    // the same fail-safe direction main.cpp already takes when the HID handle
-    // is lost: never assert a disciplined 10 MHz reference that nothing has
-    // confirmed.
+    if (n < 2) return false;
+    // The whole of byte 0 is the lock indicator: 0x7f means locked.
     //
-    // Two decodes have now been tried and both were wrong:
+    // This is the third decode tried here, and the first with ground truth on
+    // BOTH sides of the transition. The LBE-1421 sends a 64-byte report about
+    // 8 times a second, and across every observation only byte 0 ever varies
+    // -- bytes 1..63 are constant (0x00 then 0xff). Byte 0 takes exactly three
+    // values, and which value appears is decided by the front-panel LED:
     //
-    //   (rep[1] & 0x01) == 0        "bit 0 clear means locked". Measured on
-    //                               an LBE-1421 2026-09-03: byte 1 was 0x00
-    //                               in ALL 157 reports over 20s, spanning
-    //                               both a satellite-locked period and a
-    //                               0-satellite period. Bit 0 is never set,
-    //                               so this is a constant `true` -- which is
-    //                               the bug a field replug exposed, where
-    //                               every UI kept saying "Locked" while the
-    //                               unit was visibly still acquiring.
+    //     LED SOLID  (locked)    0x7f, and only 0x7f     4 sessions, incl. 20h continuous
+    //     LED BLINK  (unlocked)  0x6e or 0x76, never 0x7f    157 samples
     //
-    //   rep[0] == 0x7f              a "status report marker" inferred from
-    //                               six samples that all happened to read
-    //                               0x7f while locked. Byte 0 is not a
-    //                               marker: the same 20s capture shows it
-    //                               alternating 0x6e / 0x76. Requiring it
-    //                               forced a constant `false`.
+    // Both states were confirmed by a human watching the LED, not inferred.
+    // The unplug/replug transition was captured live in both directions with
+    // no intermediate values (0x77..0x7e never appear), which rules out byte 0
+    // being a quality or DAC level climbing toward 127.
     //
-    // What the report does look like, 64 bytes at ~8 Hz:
+    // Why compare the whole byte instead of testing bit 0, which also fits?
+    // Because the two hypotheses are indistinguishable from this data -- 0x7f
+    // has every low bit set -- and they fail in opposite directions. If byte 0
+    // is really a status bitmask whose bits can be set independently, then
+    // `rep[0] & 0x01` would call 0x7d "locked" while some other status bit is
+    // clear. `rep[0] == 0x7f` cannot do that: anything it has not actually
+    // observed while locked reads as unlocked. A consumer steering an SDR onto
+    // the GPSDO's 10 MHz reference should get a false negative, never a false
+    // positive.
     //
-    //     6e 00 ff ff ff ff ...     0 satellites, no fix
-    //     76 00 ff ff ff ff ...     0 satellites, no fix
-    //     7f 00 ff ff ff ff ...     locked with a fix
+    // The two earlier decodes, both wrong, both for the same reason -- a
+    // format concluded from samples taken in only ONE device state:
     //
-    // Byte 0 MAY track lock -- 0x7f was only ever seen while locked -- but
-    // that is two observations, which is exactly the reasoning that produced
-    // the second wrong decode. Restoring this needs a controlled capture:
-    // record the report stream across a known-locked and known-unlocked
-    // period, confirmed against the front-panel LED, and find the bit that
-    // actually changes. Until then has_fix is the trustworthy signal and is
-    // what every consumer keys "Locked" off.
-    return false;
+    //   (rep[1] & 0x01) == 0   "bit 0 clear means locked". Byte 1 is 0x00 in
+    //                          every report ever captured, locked or not, so
+    //                          this was a constant TRUE. It is why every UI
+    //                          kept reporting "Locked" through a replug while
+    //                          the unit was visibly still acquiring.
+    //
+    //   rep[0] == 0x7f as a    right predicate, wrong reason. 0x7f was called
+    //   "report marker"        a report-ID and the check was placed before the
+    //                          byte-1 test; when byte 0 turned out to vary it
+    //                          was withdrawn as broken. It was not broken --
+    //                          it was reading unlocked during an unlocked
+    //                          period. Reinstated here on evidence.
+    //
+    // If a future unit reports a different locked value, this returns false
+    // (safe) rather than mis-reporting, and the fix is to widen this set with
+    // a new LED-confirmed observation -- not to loosen it to a bit test.
+    return rep[0] == kLockedStatus;
 }
 
 std::string HidSource::discover()
