@@ -48,6 +48,9 @@
 WBR_GPSD_SOCK="${WBR_GPSD_SOCK:-/run/wbr-gps/gpsd.sock}"
 WBR_GPSD_DIR="$(dirname "$WBR_GPSD_SOCK")"
 WBR_GPSD_HOLDERS="$WBR_GPSD_DIR/holders"
+# Binaries this launcher is about to run that might want GPS. Set by the
+# launcher before calling wbr_gpsd_session_start; missing entries are ignored.
+WBR_GPSD_CONSUMERS=("${WBR_GPSD_CONSUMERS[@]}")
 WBR_GPSD_HELD=0
 
 _wbr_gpsd_binary() {
@@ -80,6 +83,38 @@ except OSError:
 PY
 }
 
+# Would starting the daemon BREAK one of the programs about to run?
+#
+# The daemon takes the GPSDO exclusively, so a consumer that still opens
+# /dev/ttyACM0 itself gets EBUSY and reports no GPS -- worse than not running
+# the daemon at all. And this cannot be settled per-repo: `bash SIGINT` launches
+# gsm_monitor and bwi_server from OTHER repos, which may not have migrated, so
+# the GUI merging first would silently break them.
+#
+# Rather than demanding the repos merge in lockstep, look at the binaries.
+# Classification by what each references:
+#
+#   references wbr-gpsd ............... migrated, safe
+#   references /dev/ttyACM or by-id
+#     but NOT wbr-gpsd ............... UNMIGRATED -> do not start the daemon
+#   references neither ............... does not use GPS -> safe
+#   not installed .................... cannot be broken -> safe
+#
+# Self-correcting: as each program migrates, this starts passing on its own,
+# with no coordination between repos.
+_wbr_gpsd_unmigrated_consumers() {
+    local b out=""
+    for b in "$@"; do
+        [[ -n "$b" && -x "$b" ]] || continue
+        strings "$b" 2>/dev/null | grep -q "wbr-gpsd" && continue
+        if strings "$b" 2>/dev/null | grep -qE "/dev/ttyACM|serial/by-id"; then
+            out+="${out:+, }$(basename "$b")"
+        fi
+    done
+    [[ -n "$out" ]] && echo "$out"
+    return 0
+}
+
 wbr_gpsd_session_start() {
     local bin
     if ! bin="$(_wbr_gpsd_binary)"; then
@@ -110,6 +145,20 @@ wbr_gpsd_session_start() {
     mkdir -p "$WBR_GPSD_HOLDERS" 2>/dev/null || true
     : >"$WBR_GPSD_HOLDERS/$$" 2>/dev/null || true
     WBR_GPSD_HELD=1
+
+    # Refuse to claim the device if it would starve a consumer that still opens
+    # it directly. Checked BEFORE the already-running test: if another launcher
+    # started a daemon the damage is already done, and stealing it back helps
+    # nobody.
+    local stale
+    stale="$(_wbr_gpsd_unmigrated_consumers "${WBR_GPSD_CONSUMERS[@]}")"
+    if [[ -n "$stale" ]]; then
+        echo "[gps] NOT starting wbr-gpsd: $stale still open the GPS device" >&2
+        echo "[gps] directly. Running the daemon would take the port and leave" >&2
+        echo "[gps] them with no GPS. They keep working as before; migrate them" >&2
+        echo "[gps] to wbr_gps::Client and this starts automatically." >&2
+        return 0
+    fi
 
     if _wbr_gpsd_answering; then
         echo "[gps] wbr-gpsd already running -- joined as holder $$" >&2
