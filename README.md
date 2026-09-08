@@ -227,6 +227,12 @@ read as unlocked — safe, but wrong. Prefer `has_fix`. The comment in
 `src/hid_source.cpp` carries the full evidence and the two earlier decodes that
 were wrong.
 
+**The udev rule tightens device permissions.** It replaces a prior `MODE=0666`
+with the default `0660 root:dialout`. Any account that needs GPS -- including
+whatever user a demo or service runs as -- must be in the `dialout` group or it
+cannot open the port at all. Check with `id -nG` before deploying to a machine
+where programs run as someone other than the installing user.
+
 **No CI.** The test suite is real, but nothing runs it automatically.
 
 **`systemd-analyze security` scores 7.5/10.** No `CapabilityBoundingSet`,

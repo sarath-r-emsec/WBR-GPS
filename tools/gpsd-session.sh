@@ -97,7 +97,16 @@ wbr_gpsd_session_start() {
     fi
 
     # Register BEFORE starting anything, so a watchdog that is already running
-    # can never observe an empty holders directory and shut down mid-handover.
+    # is unlikely to observe an empty holders directory and shut down during a
+    # handover. This NARROWS that race, it does not close it: the watchdog's
+    # prune is a point-in-time glob, so a departing one can still decide the
+    # directory is empty in the instant before this file appears and take the
+    # daemon with it. Closing it properly needs an atomic handshake (a lock the
+    # watchdog holds while deciding, or a rendezvous fd), which is more
+    # machinery than the failure deserves -- the loser is a launcher that finds
+    # no daemon and starts its own, so the outcome is a brief GPS gap, never a
+    # held-by-nothing device. Raised by an independent audit after an earlier
+    # version of this comment claimed the race was eliminated.
     mkdir -p "$WBR_GPSD_HOLDERS" 2>/dev/null || true
     : >"$WBR_GPSD_HOLDERS/$$" 2>/dev/null || true
     WBR_GPSD_HELD=1
