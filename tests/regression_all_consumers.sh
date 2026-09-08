@@ -151,12 +151,35 @@ fi
 echo "=== 1. choose PROD or SELF-HOSTED mode ==="
 MODE="SELF-HOSTED"
 SOCK=""
-if systemctl is-active --quiet wbr-gpsd.service 2>/dev/null && [[ -S /run/wbr-gps/gpsd.sock ]]; then
+# Ask the SOCKET, not systemd. A daemon started by a launcher (bash SIGINT,
+# ./run_rtsa.sh) is not a systemd unit, so `systemctl is-active` says inactive
+# while a perfectly healthy daemon is holding the device -- this script then
+# tried to start a second one, got EBUSY, and reported a hard FAIL on a
+# working system. Whether a daemon is REACHABLE is the only thing that
+# matters, and connecting is the only way to know: a socket file left behind
+# by a hard kill exists but answers nothing.
+if [[ -S /run/wbr-gps/gpsd.sock ]] && timeout 3 python3 - /run/wbr-gps/gpsd.sock <<'PROBE'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(1.5)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(b'{"op":"get"}\n')
+    sys.exit(0 if s.recv(64) else 1)
+except OSError:
+    sys.exit(1)
+PROBE
+then
     MODE="PROD"
     SOCK="/run/wbr-gps/gpsd.sock"
-    note "wbr-gpsd.service is active -- driving the real production socket"
+    if systemctl is-active --quiet wbr-gpsd.service 2>/dev/null; then
+        note "wbr-gpsd is running as a systemd service -- driving the real socket"
+    else
+        note "wbr-gpsd is running (started by a launcher, not systemd) -- driving"
+        note "the real socket. Leave that launcher up for the duration of this run."
+    fi
 else
-    note "wbr-gpsd.service is not active (or not installed) -- this script has"
+    note "no daemon is answering on /run/wbr-gps/gpsd.sock -- this script has"
     note "no root, so it starts its own instance against the real device."
     SOCK="$TMPDIR/gpsd.sock"
     DAEMON_BIN="$WBR_GPS_DIR/build/wbr-gpsd"
