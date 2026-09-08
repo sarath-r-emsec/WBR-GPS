@@ -94,16 +94,31 @@ fi
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=tty --subsystem-match=hidraw
 
-echo "==> installing systemd unit"
+echo "==> installing runtime directory config"
+# /run is tmpfs, so /run/wbr-gps does not survive a reboot. The daemon is now
+# started by a launcher running as an ordinary user, and an ordinary user
+# cannot create a directory in /run -- so systemd-tmpfiles makes it at boot.
+# 0775 root:dialout: dialout already owns /dev/ttyACM0, so anyone allowed to
+# read the device is allowed to serve it. No new privilege is granted.
+install -m 0644 "$HERE/tmpfiles/wbr-gps.conf" /etc/tmpfiles.d/wbr-gps.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/wbr-gps.conf
+echo "    /run/wbr-gps: $(stat -c '%A %U:%G' /run/wbr-gps 2>/dev/null || echo MISSING)"
+
+echo "==> installing systemd unit (NOT enabled)"
 install -m 0644 "$HERE/systemd/wbr-gpsd.service" /etc/systemd/system/wbr-gpsd.service
 systemctl daemon-reload
-systemctl enable wbr-gpsd.service
-# restart, not `enable --now`: on a first install this starts the daemon
-# same as --now would; on a re-run after a rebuild, --now is a no-op against
-# an already-running unit and would leave the OLD binary resident in memory
-# even though a new one just landed at /usr/local/bin/wbr-gpsd. restart
-# always picks up whatever is on disk right now.
-systemctl restart wbr-gpsd.service
+# Deliberately NOT enabled. The daemon is started by whichever launcher needs
+# it (SIGINT, run_rtsa.sh) and dies with it, so the GPSDO is free whenever
+# nothing is using it -- which matters while some programs still open the
+# device directly and would get EBUSY from an idle daemon holding the port.
+#
+# The unit is still installed, so an always-on deployment is one command away
+# on a headless box with no GUI:
+#     sudo systemctl enable --now wbr-gpsd
+# Do that only once every consumer on the machine reads GPS from the daemon.
+systemctl disable wbr-gpsd.service >/dev/null 2>&1 || true
+systemctl stop    wbr-gpsd.service >/dev/null 2>&1 || true
+echo "    installed but not enabled (per-launcher model)"
 
 echo "==> automated smoke checks"
 # Poll rather than a flat sleep: a fixed `sleep 2` reports a false failure
@@ -111,14 +126,25 @@ echo "==> automated smoke checks"
 # documented in the unit's After=systemd-udev-settle.service comment and is
 # retrying with backoff). Bounded at 10s -- comfortably past a couple of
 # RestartSec=2 cycles -- so a genuinely dead unit still fails promptly.
+# Nothing runs by design now, so start a throwaway daemon exactly as a launcher
+# would, prove it works, and stop it. Verifying the install must not leave the
+# device held.
+SMOKE_DIR="$(mktemp -d)"
+"$BINARY" --socket "$SMOKE_DIR/s.sock" --lock "$SMOKE_DIR/pid" --group "" \
+    >/dev/null 2>&1 &
+SMOKE_PID=$!
 active=0
 for _ in $(seq 1 10); do
-  if systemctl is-active --quiet wbr-gpsd.service; then
+  if [[ -S "$SMOKE_DIR/s.sock" ]] && kill -0 "$SMOKE_PID" 2>/dev/null; then
     active=1
     break
   fi
   sleep 1
 done
+kill -TERM "$SMOKE_PID" 2>/dev/null || true
+sleep 1
+kill -9 "$SMOKE_PID" 2>/dev/null || true
+rm -rf "$SMOKE_DIR"
 if [[ "$active" -ne 1 ]]; then
   echo "wbr-gpsd.service is not active 10s after restart -- installation left" >&2
   echo "the system CONFIGURED (unit installed, udev rules active, enabled) but" >&2

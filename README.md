@@ -64,15 +64,33 @@ does not matter. Passing `--serial` disables that.
 sudo ./install.sh
 ```
 
-This installs three files:
+That is the whole install. It puts four files in place:
 
 | path | purpose |
 |------|---------|
 | `/usr/local/bin/wbr-gpsd` | the daemon |
-| `/etc/systemd/system/wbr-gpsd.service` | `Restart=always`, and `RuntimeDirectory=wbr-gps` so `/run/wbr-gps` is recreated at every boot |
 | `/etc/udev/rules.d/99-wbr-gps.rules` | creates `/dev/gpsdo`, sets `ID_MM_DEVICE_IGNORE=1` so ModemManager stops probing the port |
+| `/etc/tmpfiles.d/wbr-gps.conf` | recreates `/run/wbr-gps` at every boot, group-writable by `dialout`, so a launcher can create the socket without root |
+| `/etc/systemd/system/wbr-gpsd.service` | installed but **not enabled** — see below |
 
-then runs `systemctl daemon-reload`, `enable`, and `restart`.
+**The daemon does not run as a service.** It is started by whichever launcher
+needs it (`bash SIGINT`, `./run_rtsa.sh`) and dies with it, including on
+`kill -9`. So the GPSDO is free whenever nothing is using it — which matters
+while some programs still open the device directly and would get `EBUSY` from
+an idle daemon holding the port.
+
+The unit file is still installed, so an always-on deployment is one command
+away on a headless box with no GUI:
+
+```bash
+sudo systemctl enable --now wbr-gpsd
+```
+
+Do that only once every consumer on that machine reads GPS from the daemon.
+
+**Whoever runs the programs must be in the `dialout` group** (`id -nG`). The
+udev rule sets the device `0660 root:dialout`; an account outside that group
+cannot open GPS at all.
 
 > **From this moment the daemon owns the serial port exclusively.** Any program
 > still opening `/dev/ttyACM0` directly gets `EBUSY`. That is the guarantee
