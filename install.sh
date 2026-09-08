@@ -24,14 +24,15 @@ fi
 
 cat <<'EOF' >&2
 ================================================================================
- WARNING: after this daemon starts, it becomes the SOLE owner of the GPSDO.
- Any other program still opening /dev/ttyACM0 or /dev/gpsdo directly --
- phase2_se and anything else not yet migrated to the wbr-gps client library
- (Tasks 13-16) -- will start failing LOUDLY with EBUSY instead of silently
- stealing bytes from the daemon. That is the fix working as designed, not a
- regression, but it is a visible behaviour change starting the moment this
- script enables the service. Confirm those programs are expected to fail,
- or that this is an acceptable maintenance window, before continuing.
+ This installs files only. It does NOT start or enable anything: the daemon
+ is launched by whichever program needs it (bash SIGINT, ./run_rtsa.sh) and
+ dies with it, so the GPSDO stays free the rest of the time.
+
+ WHILE the daemon runs it is the SOLE owner of the GPSDO, and any program
+ still opening /dev/ttyACM0 or /dev/gpsdo directly would get EBUSY. The
+ launchers check for that and refuse to start the daemon while any consumer
+ they run is still unmigrated, so a half-migrated machine keeps working --
+ but if you start the daemon by hand, that protection is not there.
 
  SEPARATELY: this script also retightens /dev/hidraw* for vendor 1dd2 from
  mode 0666 (the current, permissive 99-leobodnar.rules) to 0660 group
@@ -147,15 +148,16 @@ kill -9 "$SMOKE_PID" 2>/dev/null || true
 rm -rf "$SMOKE_DIR"
 if [[ "$active" -ne 1 ]]; then
   echo "wbr-gpsd.service is not active 10s after restart -- installation left" >&2
-  echo "the system CONFIGURED (unit installed, udev rules active, enabled) but" >&2
-  echo "the daemon itself is not running. Check: journalctl -u wbr-gpsd -n 50" >&2
+  echo "the system CONFIGURED (files installed, udev rules active) but the" >&2
+  echo "daemon would not start. Run it by hand to see why:" >&2
+  echo "  /usr/local/bin/wbr-gpsd --socket /tmp/t.sock --lock /tmp/t.pid --group ''" >&2
   echo "Note: /dev/hidraw* for vendor 1dd2 is ALREADY retightened to 0660" >&2
   echo "group dialout (was 0666 under the old 99-leobodnar.rules) -- that took" >&2
   echo "effect regardless of this failure, and nothing has taken over hidraw" >&2
   echo "access to compensate." >&2
   exit 1
 fi
-echo "    wbr-gpsd.service is active"
+echo "    daemon starts and answers (test instance started and stopped)"
 
 if [[ -L /dev/gpsdo ]]; then
   echo "    /dev/gpsdo symlink present -> $(readlink -f /dev/gpsdo 2>/dev/null || echo '?')"
@@ -180,25 +182,32 @@ cat <<'EOF'
   #    or a physical replug to pick up the new rule.
   udevadm info -q property -n /dev/gpsdo | grep -E 'ID_MM_DEVICE_IGNORE|ID_MM_CANDIDATE'
 
-  # 3. Exactly one opener, and it is wbr-gpsd.
-  lsof "$(readlink -f /dev/gpsdo)"
+  # 3. NOTHING should hold the device right now. Nothing is running.
+  #    Do not use lsof for this: the daemon runs as another user when
+  #    started by systemd, and lsof then reports zero openers whether the
+  #    device is held or not. Ask the kernel instead -- expect it to SUCCEED
+  #    here, because nothing should own the port yet.
+  python3 -c "import os; os.close(os.open('/dev/gpsdo', os.O_RDWR|os.O_NOCTTY)); print('free')"
 
-  # 4. The socket exists with the right ownership (expect srw-rw---- root dialout).
-  ls -l /run/wbr-gps/gpsd.sock
+  # 4. Start something that needs GPS, and watch the daemon appear.
+  cd /path/to/SIGINT_GUI && bash SIGINT
+  #    expect: "[gps] wbr-gpsd started, holder <pid>"
 
-  # 5. It answers (expect a HELLO line, then a FIX line).
-  printf '{"op":"get"}\n' | socat - UNIX-CONNECT:/run/wbr-gps/gpsd.sock
+  # 5. While it runs, the daemon answers (expect HELLO then FIX):
+  tools/gpsq
 
-  # 6. Restart-on-crash: proves crash supervision and that G1 (single owner)
-  #    is re-established, NOT G5 (that is S12: kill the daemon, confirm
-  #    ZERO openers and clients reporting unavailable -- the opposite of
-  #    this step, which forces a restart). Guarded on is-active: MainPID is
-  #    "0" when the unit is not running, and `kill -9 0` sends SIGKILL to
-  #    this shell's entire process group -- do not paste the unguarded form.
-  systemctl is-active --quiet wbr-gpsd && sudo kill -9 "$(systemctl show -p MainPID --value wbr-gpsd)"
-  sleep 4 && systemctl is-active wbr-gpsd && lsof "$(readlink -f /dev/gpsdo)"
+  # 6. And the device is now held -- the same probe must now FAIL with EBUSY:
+  python3 -c "import os; os.open('/dev/gpsdo', os.O_RDWR|os.O_NOCTTY)"
 
-Reminder: any program still opening the GPSDO directly (not yet migrated to
-the wbr-gps client) will now see EBUSY. That is expected until Tasks 13-16
-land.
+  # 7. Stop the launcher. Within ~2s the daemon exits and step 3 succeeds
+  #    again -- proving the GPSDO is released for anything else to use.
+
+Reminder: the daemon is NOT a service here. If you want the always-on model
+instead -- a headless box where everything reads GPS from the daemon -- the
+unit is installed and one command away:
+
+  sudo systemctl enable --now wbr-gpsd
+
+Do that only once every consumer on the machine is migrated; an idle daemon
+holding the port starves anything that still opens the device directly.
 EOF
