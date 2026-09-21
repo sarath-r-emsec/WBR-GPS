@@ -92,13 +92,31 @@ PY
 # the GUI merging first would silently break them.
 #
 # Rather than demanding the repos merge in lockstep, look at the binaries.
-# Classification by what each references:
+# The ONLY question that matters is whether a binary can open the device, so
+# that is the only thing tested:
 #
-#   references wbr-gpsd ............... migrated, safe
-#   references /dev/ttyACM or by-id
-#     but NOT wbr-gpsd ............... UNMIGRATED -> do not start the daemon
-#   references neither ............... does not use GPS -> safe
-#   not installed .................... cannot be broken -> safe
+#   references /dev/ttyACM or serial/by-id .. CAN open it -> UNMIGRATED
+#   references neither ..................... cannot -> safe
+#   not installed .......................... cannot be broken -> safe
+#
+# An earlier version checked for the string "wbr-gpsd" FIRST and treated a hit
+# as proof of migration. That was wrong, and it took a build to notice: since
+# WBR-GPS became an optional dependency, a consumer built WITHOUT it still
+# carries "wbr-gpsd" in its help text ("--gps-socket is ignored: this build has
+# no wbr-gpsd client") while opening /dev/ttyACM0 directly. Measured on a
+# standalone phase2_server: 2 wbr-gpsd strings AND 2 device strings. The old
+# order classified it as migrated and would have started the daemon on top of
+# it -- precisely the breakage this guard exists to prevent.
+#
+# Testing only for device paths cannot make that mistake. A migrated binary has
+# NONE: the client library contains no device code by construction, and
+# tests/check_no_device_access.sh fails the build if that ever changes. Verified
+# on the real binaries -- daemon-build gsm_monitor and phase2_server both have
+# zero device strings; the standalone builds of each have two.
+#
+# The failure direction is also right. A false "unmigrated" (some unrelated
+# binary happens to embed a tty path) only declines to start the daemon, and
+# every program keeps working exactly as it did before wbr-gpsd existed.
 #
 # Self-correcting: as each program migrates, this starts passing on its own,
 # with no coordination between repos.
@@ -106,7 +124,6 @@ _wbr_gpsd_unmigrated_consumers() {
     local b out=""
     for b in "$@"; do
         [[ -n "$b" && -x "$b" ]] || continue
-        strings "$b" 2>/dev/null | grep -q "wbr-gpsd" && continue
         if strings "$b" 2>/dev/null | grep -qE "/dev/ttyACM|serial/by-id"; then
             out+="${out:+, }$(basename "$b")"
         fi
