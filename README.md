@@ -28,13 +28,21 @@ owner — which is what this daemon is.
 
 ## Install
 
-If you are also building the consumers, they expect a sibling checkout layout:
+WBR-GPS is an **optional** dependency of the consumers. WBR-SA and WBR-GSM
+build and run with or without it: their CMake looks for a sibling checkout and,
+finding none, compiles their own GPS readers instead and behaves as it did
+before this daemon existed. Nothing has to be installed in lockstep.
+
+To get the daemon, check this repo out beside them:
 
 ```
 ~/prefix/src/WBR-GPS      <- this repo
 ~/prefix/src/WBR-GSM         (its CMake looks for ../WBR-GPS)
 ~/prefix/src/WBR-SA
 ```
+
+SIGINT_GUI needs no checkout at all: it carries its own copy of the Python
+client and talks to the daemon over the socket when one is running.
 
 ### 1. Build and test
 
@@ -137,13 +145,26 @@ consistent position across consumers.
 
 **C++**
 
+Make it optional, so your program still builds where WBR-GPS is not checked
+out. Decide at CONFIGURE time and bake it in -- never fall back at run time,
+which would have your program open the device on a machine where the daemon is
+merely slow to start, the exact contention this removes.
+
 ```cmake
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../WBR-GPS
-                 ${CMAKE_CURRENT_BINARY_DIR}/wbr-gps EXCLUDE_FROM_ALL)
-target_link_libraries(your_prog PRIVATE wbr_gps_core)
-target_include_directories(your_prog PRIVATE
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../WBR-GPS/include)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../WBR-GPS/CMakeLists.txt)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../WBR-GPS
+                     ${CMAKE_CURRENT_BINARY_DIR}/wbr-gps EXCLUDE_FROM_ALL)
+    target_link_libraries(your_prog PRIVATE wbr_gps_core)
+    target_include_directories(your_prog PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR}/../WBR-GPS/include)
+    target_compile_definitions(your_prog PRIVATE HAVE_WBR_GPS)
+else()
+    message(STATUS "WBR-GPS not found -- building without daemon GPS support")
+endif()
 ```
+
+Then guard the call sites with `#ifdef HAVE_WBR_GPS`. WBR-SA and WBR-GSM both
+do exactly this; copy from whichever is closer to your case.
 
 ```cpp
 #include "wbr_gps/client.hpp"
