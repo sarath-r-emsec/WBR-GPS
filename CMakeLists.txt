@@ -18,6 +18,29 @@ if(WBR_GPS_COVERAGE)
 endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include(GNUInstallDirs)
+
+# ON (default): install udev rules, tmpfiles.d config and a system-wide
+# systemd unit -- needs root at install time, matches install.sh's current
+# behavior, socket lives at the compiled-in /run/wbr-gps (tmpfiles.d-managed).
+#
+# OFF: no root needed ANYWHERE, not for configure, build or install. Installs
+# a per-user systemd unit instead (WantedBy=default.target, `systemctl --user
+# enable --now wbr-gpsd`), pinned via Environment=WBR_GPS_SOCKET_DIR=%t/wbr-gps
+# (%t = $XDG_RUNTIME_DIR, always present, tmpfs, owned by the invoking user --
+# see gps_types.cpp's default_socket_path()/default_lock_path()). The daemon
+# creates that directory itself on first bind (server.cpp's
+# ensure_parent_dir()), so there is no tmpfiles.d equivalent to install. No
+# udev rule is installed in this mode -- see the message() below for exactly
+# what that costs and why none of it is fatal.
+#
+# Set CMAKE_INSTALL_PREFIX (at CONFIGURE time, e.g.
+# `cmake -DCMAKE_INSTALL_PREFIX=$HOME/prefix ...`) for a non-system prefix;
+# the per-user unit's ExecStart is baked from CMAKE_INSTALL_FULL_BINDIR at
+# configure time, so passing --prefix only to `cmake --install` later would
+# generate a unit pointing at the wrong binary path.
+option(WBR_GPS_SYSTEM_SERVICE
+  "Install udev rules, tmpfiles.d config and a SYSTEM systemd unit (needs root). OFF = per-user unit, no root anywhere." ON)
 
 # Shared between the daemon and the client library.
 add_library(wbr_gps_core STATIC
@@ -89,7 +112,85 @@ add_test(NAME client_table COMMAND test_client_table)
 # The daemon. Everything it needs is in wbr_gps_core; main.cpp is wiring only.
 add_executable(wbr-gpsd src/main.cpp)
 target_link_libraries(wbr-gpsd PRIVATE wbr_gps_core)
-install(TARGETS wbr-gpsd RUNTIME DESTINATION bin)
+install(TARGETS wbr-gpsd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime)
+
+# ---------------------------------------------------------------------------
+# Service integration -- everything install.sh used to do with raw `install`
+# calls now lives here, so `cmake --install build` (root) or
+# `cmake --install build` (no root, WBR_GPS_SYSTEM_SERVICE=OFF) does the
+# whole job; install.sh is now a thin wrapper (pre-flight verify, the
+# 99-leobodnar.rules migration, and the post-install smoke test, none of
+# which belong in a CMake install() rule).
+#
+# Two COMPONENTs (runtime = the binary, service = udev/tmpfiles/systemd unit
+# + their reload hooks), not because anyone installs them separately in
+# normal use -- a plain `cmake --install build` with no --component installs
+# both -- but so install.sh can install the binary FIRST, then run
+# `systemd-analyze verify` against a unit file whose ExecStart now resolves
+# to a real, just-installed binary, before touching udev/tmpfiles/systemd at
+# all: `cmake --install build --component runtime` then
+# `cmake --install build --component service`.
+# ---------------------------------------------------------------------------
+if(WBR_GPS_SYSTEM_SERVICE)
+  install(FILES udev/99-wbr-gps.rules DESTINATION /etc/udev/rules.d COMPONENT service)
+  install(FILES tmpfiles/wbr-gps.conf DESTINATION /etc/tmpfiles.d COMPONENT service)
+  install(FILES systemd/wbr-gpsd.service DESTINATION /etc/systemd/system COMPONENT service)
+
+  # Materialize right now instead of waiting for the next boot/udev event --
+  # same reasoning install.sh already had for these three calls. Each one
+  # checks RESULT_VARIABLE and fails the install loudly on error: CMake
+  # 3.16 (this project's minimum) predates COMMAND_ERROR_IS_FATAL (3.19),
+  # and execute_process() otherwise swallows a nonzero exit silently, which
+  # would regress the old script's `set -euo pipefail` fail-loud behavior.
+  install(CODE [[
+    execute_process(COMMAND systemd-tmpfiles --create /etc/tmpfiles.d/wbr-gps.conf RESULT_VARIABLE _r)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "systemd-tmpfiles --create failed (exit code ${_r})")
+    endif()
+  ]] COMPONENT service)
+  install(CODE [[
+    execute_process(COMMAND udevadm control --reload-rules RESULT_VARIABLE _r)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "udevadm control --reload-rules failed (exit code ${_r})")
+    endif()
+  ]] COMPONENT service)
+  install(CODE [[
+    execute_process(COMMAND udevadm trigger --subsystem-match=tty --subsystem-match=hidraw RESULT_VARIABLE _r)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "udevadm trigger failed (exit code ${_r})")
+    endif()
+  ]] COMPONENT service)
+  install(CODE [[
+    execute_process(COMMAND systemctl daemon-reload RESULT_VARIABLE _r)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "systemctl daemon-reload failed (exit code ${_r})")
+    endif()
+  ]] COMPONENT service)
+else()
+  message(STATUS
+    "WBR_GPS_SYSTEM_SERVICE=OFF: installing a PER-USER systemd unit, no root "
+    "needed anywhere (configure, build, or install). Trade-offs vs the "
+    "system install, all non-fatal -- the daemon degrades, it does not fail "
+    "to start:\n"
+    "  (1) no udev rule -> ModemManager may still probe the GPSDO's tty\n"
+    "  (2) no /dev/gpsdo symlink -> relies on device-presence scanning only\n"
+    "  (3) hidraw (GPSDO lock status) is likely root-only without a rule "
+    "granting your group access, so hid_ok/gpsdo_locked will probably stay "
+    "false; NMEA/serial is unaffected.\n"
+    "Socket/lock file live under $XDG_RUNTIME_DIR/wbr-gps, created by the "
+    "daemon itself on first bind -- nothing to pre-create.")
+
+  configure_file(systemd/wbr-gpsd.user.service.in
+                 ${CMAKE_CURRENT_BINARY_DIR}/wbr-gpsd.service @ONLY)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wbr-gpsd.service
+          DESTINATION $ENV{HOME}/.config/systemd/user COMPONENT service)
+  install(CODE [[
+    execute_process(COMMAND systemctl --user daemon-reload RESULT_VARIABLE _r)
+    if(NOT _r EQUAL 0)
+      message(FATAL_ERROR "systemctl --user daemon-reload failed (exit code ${_r})")
+    endif()
+  ]] COMPONENT service)
+endif()
 
 # Client library test: launches the real wbr-gpsd against a pty, so it
 # exercises the actual wire protocol rather than a stub.

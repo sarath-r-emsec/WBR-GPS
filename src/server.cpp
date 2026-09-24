@@ -34,6 +34,22 @@ bool fill_addr(struct sockaddr_un& addr, const std::string& path)
     return true;
 }
 
+// Best-effort: create path's parent directory if it does not already exist,
+// so an unprivileged/prefix install (no /etc/tmpfiles.d entry -- e.g.
+// WBR_GPS_SOCKET_DIR pointed at a directory under $XDG_RUNTIME_DIR) needs no
+// separate install step for either the socket or the lock file. A no-op
+// when the directory is already there -- the common system-install case,
+// where /run/wbr-gps already exists with tmpfiles.d's group ownership,
+// which a plain mkdir() here must never touch. Silent on failure: the
+// open()/bind() that follows fails with its own clear ENOENT/EACCES either
+// way, so duplicating that diagnostic here would be redundant.
+void ensure_parent_dir(const std::string& path)
+{
+    const size_t slash = path.rfind('/');
+    if (slash == std::string::npos || slash == 0) return;
+    ::mkdir(path.substr(0, slash).c_str(), 0700);
+}
+
 // Is something already listening on this socket path? Used to distinguish a
 // stale file from a live daemon: unlinking a live daemon's socket would let
 // two daemons run, which is exactly what we must prevent.
@@ -81,6 +97,8 @@ bool Server::acquire_singleton(const std::string& lock_path)
         return false;
     }
 
+    ensure_parent_dir(lock_path);
+
     const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) {
         std::fprintf(stderr, "[wbr-gpsd] open %s: %s\n",
@@ -119,6 +137,8 @@ bool Server::listen_on(const std::string& sock_path, const char* group, mode_t m
                      sock_path.size(), kSunPathMax - 1, sock_path.c_str());
         return false;
     }
+
+    ensure_parent_dir(sock_path);
 
     if (socket_is_live(sock_path)) {
         std::fprintf(stderr, "[wbr-gpsd] another daemon is listening on %s\n",

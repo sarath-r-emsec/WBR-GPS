@@ -22,7 +22,7 @@ public:
     // true once the thread is running; it returns true even if the daemon is
     // not up yet, because the thread will keep retrying. Check
     // snapshot().service_ok to learn whether data is actually flowing.
-    bool start(const std::string& sock_path = kDefaultSocketPath,
+    bool start(const std::string& sock_path = default_socket_path(),
                bool want_nmea = false);
     void stop();
 
@@ -64,7 +64,7 @@ private:
 // One synchronous request. For startup checks such as an external-reference
 // decision made before any long-lived client exists. Returns a default
 // Snapshot with service_ok = false if the daemon is down.
-Snapshot get_once(const std::string& sock_path = kDefaultSocketPath,
+Snapshot get_once(const std::string& sock_path = default_socket_path(),
                   int timeout_ms = 500);
 
 } // namespace wbr_gps

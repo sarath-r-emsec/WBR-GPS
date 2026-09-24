@@ -76,10 +76,10 @@ int64_t now_unix_ms()
 // --- command line -----------------------------------------------------------
 
 struct Options {
-    std::string socket_path = kDefaultSocketPath;
+    std::string socket_path = default_socket_path();
     std::string serial_path;                     // empty: auto-discover
     std::string hid_path;                        // empty: auto-discover
-    std::string lock_path   = "/run/wbr-gps/wbr-gpsd.pid";
+    std::string lock_path   = default_lock_path();
     std::string group       = "dialout";         // empty: leave ownership alone
     int         baud        = kDefaultBaud;
     int64_t     stale_ms    = kDefaultStaleMs;

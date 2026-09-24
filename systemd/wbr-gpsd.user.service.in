@@ -1,0 +1,22 @@
+[Unit]
+Description=WBR GPS proxy daemon (per-user, no root -- see WBR-GPS/README.md)
+# No After=/Wants= on systemd-udev-settle.service: that unit only exists in
+# the system (PID-1) manager, not in --user, and there is no udev rule to
+# wait for in this mode anyway (WBR_GPS_SYSTEM_SERVICE=OFF at configure
+# time) -- see the CMakeLists.txt message printed when that option is OFF
+# for what is lost without it (ModemManager guard, /dev/gpsdo symlink,
+# hidraw group access).
+
+[Service]
+Type=simple
+# %t is systemd's specifier for $XDG_RUNTIME_DIR in a --user unit: always
+# set by logind, tmpfs, no root needed to create or use it. The daemon
+# creates the wbr-gps subdirectory itself on first bind (server.cpp's
+# ensure_parent_dir()), so nothing else has to pre-create it.
+Environment=WBR_GPS_SOCKET_DIR=%t/wbr-gps
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/wbr-gpsd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
