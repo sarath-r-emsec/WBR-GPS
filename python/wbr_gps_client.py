@@ -8,9 +8,25 @@ this daemon exists to remove.
 Standard library only: this is imported by Django and must add no dependency.
 """
 import json
+import os
 import socket
 
+# Compiled-in fallback, the same as wbr_gps::kDefaultSocketPath in C++.
 DEFAULT_SOCKET = "/run/wbr-gps/gpsd.sock"
+
+
+def default_socket_path():
+    """The socket to use when the caller names none.
+
+    $WBR_GPS_SOCKET_DIR/gpsd.sock when that variable is set and non-empty, else
+    DEFAULT_SOCKET -- the same rule as wbr_gps::default_socket_path() (C++), so
+    a daemon moved with WBR_GPS_SOCKET_DIR is found by the daemon, the C++
+    consumers and this client alike. Resolved on every call, NOT at import: a
+    long-lived Django process must follow the environment it was started with,
+    and a default argument bound at import time could not.
+    """
+    d = os.environ.get("WBR_GPS_SOCKET_DIR", "")
+    return os.path.join(d, "gpsd.sock") if d else DEFAULT_SOCKET
 
 # The shape returned when we cannot reach the daemon. Every field is the
 # pessimistic value, so a caller that ignores service_ok still cannot mistake
@@ -44,7 +60,7 @@ def unavailable():
     return dict(_UNAVAILABLE)
 
 
-def get_once(sock_path=DEFAULT_SOCKET, timeout=0.5):
+def get_once(sock_path=None, timeout=0.5):
     """One snapshot from the daemon, as a dict.
 
     Always returns a dict; never raises. A Unix-socket round trip is
@@ -56,6 +72,8 @@ def get_once(sock_path=DEFAULT_SOCKET, timeout=0.5):
     This is acceptable against a local cooperative daemon, but callers should
     be aware of this property.
     """
+    if sock_path is None:
+        sock_path = default_socket_path()
     sock = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

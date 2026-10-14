@@ -14,7 +14,7 @@ int64_t now_mono_ms()
 
 std::string default_socket_path()
 {
-    if (const char* dir = std::getenv("WBR_GPS_SOCKET_DIR")) {
+    if (const char* dir = std::getenv("WBR_GPS_SOCKET_DIR"); dir && *dir) {
         return std::string(dir) + "/gpsd.sock";
     }
     return kDefaultSocketPath;
@@ -22,7 +22,7 @@ std::string default_socket_path()
 
 std::string default_lock_path()
 {
-    if (const char* dir = std::getenv("WBR_GPS_SOCKET_DIR")) {
+    if (const char* dir = std::getenv("WBR_GPS_SOCKET_DIR"); dir && *dir) {
         return std::string(dir) + "/wbr-gpsd.pid";
     }
     return "/run/wbr-gps/wbr-gpsd.pid";

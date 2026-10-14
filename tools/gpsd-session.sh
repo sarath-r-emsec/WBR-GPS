@@ -45,7 +45,9 @@
 # dies with it via pdeathsig: the failure direction is always "device
 # released", never "device held by nothing".
 
-WBR_GPSD_SOCK="${WBR_GPSD_SOCK:-/run/wbr-gps/gpsd.sock}"
+# Socket: WBR_GPSD_SOCK (this launcher's own override) > $WBR_GPS_SOCKET_DIR/gpsd.sock
+# (the variable the daemon and every consumer read) > the system default.
+WBR_GPSD_SOCK="${WBR_GPSD_SOCK:-${WBR_GPS_SOCKET_DIR:-/run/wbr-gps}/gpsd.sock}"
 WBR_GPSD_DIR="$(dirname "$WBR_GPSD_SOCK")"
 WBR_GPSD_HOLDERS="$WBR_GPSD_DIR/holders"
 # Binaries this launcher is about to run that might want GPS. Set by the
@@ -54,13 +56,13 @@ WBR_GPSD_CONSUMERS=("${WBR_GPSD_CONSUMERS[@]}")
 WBR_GPSD_HELD=0
 
 _wbr_gpsd_binary() {
-    if [[ -x /usr/local/bin/wbr-gpsd ]]; then
-        echo /usr/local/bin/wbr-gpsd
-        return 0
-    fi
     local here c
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    for c in "$here/build/wbr-gpsd" "$here/../WBR-GPS/build/wbr-gpsd"; do
+    # An install under $WBR_PREFIX wins over the system one; then PATH; then a
+    # build tree next to this script.
+    for c in ${WBR_PREFIX:+"$WBR_PREFIX/bin/wbr-gpsd"} /usr/local/bin/wbr-gpsd \
+             "$(command -v wbr-gpsd 2>/dev/null)" \
+             "$here/build/wbr-gpsd" "$here/../WBR-GPS/build/wbr-gpsd"; do
         [[ -x "$c" ]] && { echo "$c"; return 0; }
     done
     return 1

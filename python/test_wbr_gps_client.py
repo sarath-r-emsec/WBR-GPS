@@ -101,6 +101,39 @@ class TestGetOnce(unittest.TestCase):
             d.close()
 
 
+class TestDefaultSocketResolution(unittest.TestCase):
+    """WBR_GPS_SOCKET_DIR moves the client together with the daemon."""
+
+    def setUp(self):
+        self._saved = os.environ.pop("WBR_GPS_SOCKET_DIR", None)
+
+    def tearDown(self):
+        os.environ.pop("WBR_GPS_SOCKET_DIR", None)
+        if self._saved is not None:
+            os.environ["WBR_GPS_SOCKET_DIR"] = self._saved
+
+    def test_unset_is_the_compiled_in_default(self):
+        self.assertEqual(gc.default_socket_path(), gc.DEFAULT_SOCKET)
+
+    def test_empty_counts_as_unset(self):
+        os.environ["WBR_GPS_SOCKET_DIR"] = ""
+        self.assertEqual(gc.default_socket_path(), gc.DEFAULT_SOCKET)
+
+    def test_env_dir_is_followed_at_call_time(self):
+        os.environ["WBR_GPS_SOCKET_DIR"] = "/somewhere/else"
+        self.assertEqual(gc.default_socket_path(), "/somewhere/else/gpsd.sock")
+
+    def test_get_once_without_a_path_reaches_the_daemon_in_the_env_dir(self):
+        d = StubDaemon(LOCKED_FIX)
+        try:
+            os.environ["WBR_GPS_SOCKET_DIR"] = d.dir
+            snap = gc.get_once(timeout=1.0)
+            self.assertTrue(snap["service_ok"])
+            self.assertTrue(snap["has_fix"])
+        finally:
+            d.close()
+
+
 class TestBadgeStatus(unittest.TestCase):
     """The four honest states that replace the old three-state guess."""
 

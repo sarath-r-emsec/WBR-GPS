@@ -19,12 +19,16 @@ Giving both is an error rather than a silent precedence rule -- one of the
 two would be ignored, and which one is not guessable from the command line.
 """
 
+import os
 import socket
 import sys
 import time
 
 DEFAULT_SECONDS = 1.0
-DEFAULT_SOCKET = '/run/wbr-gps/gpsd.sock'  # wbr_gps::kDefaultSocketPath
+# $WBR_GPS_SOCKET_DIR/gpsd.sock when set (same rule as wbr_gps::default_socket_path()),
+# else wbr_gps::kDefaultSocketPath.
+DEFAULT_SOCKET = (os.path.join(os.environ['WBR_GPS_SOCKET_DIR'], 'gpsd.sock')
+                  if os.environ.get('WBR_GPS_SOCKET_DIR') else '/run/wbr-gps/gpsd.sock')
 DEFAULT_REQUEST = '{"op":"get"}'
 
 USAGE = (
