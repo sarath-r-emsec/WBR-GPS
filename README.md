@@ -180,7 +180,10 @@ if (s.service_ok && s.has_fix) {
 wbr_gps::get_once();               // one-shot, for a startup check
 ```
 
-**Python** — standard library only, nothing to install.
+**Python** — standard library only, nothing to install. The client is
+`scanner/wbr_gps_client.py` in SIGINT_GUI (its only user; it used to live here). Copy that
+single file to use it elsewhere; it reads `$WBR_GPS_SOCKET_DIR/gpsd.sock` like everything
+else.
 
 ```python
 import wbr_gps_client as gc

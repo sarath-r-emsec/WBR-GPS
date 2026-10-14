@@ -31,10 +31,11 @@ import sys
 
 root = sys.argv[1]
 
-# The files a consumer links against or imports. Anything else in the tree may
-# touch the device; these three may not.
+# The files a consumer links against. Anything else in the tree may touch the
+# device; these two may not. (The Python client is not here: it lives in SIGINT_GUI,
+# scanner/wbr_gps_client.py, its only user, which tests that it opens no device.)
 #
-# BOUNDARY: this gate reads exactly these three files, not anything they
+# BOUNDARY: this gate reads exactly these two files, not anything they
 # #include transitively. gps_types.hpp is fine to bring in (pure data, no
 # device code) but if client.hpp/client.cpp ever gained a #include of a
 # header that itself opened a device, this gate would not see it -- it
@@ -44,7 +45,6 @@ root = sys.argv[1]
 FILES = [
     "include/wbr_gps/client.hpp",
     "src/client.cpp",
-    "python/wbr_gps_client.py",
 ]
 
 # --- what counts as device access -------------------------------------------
